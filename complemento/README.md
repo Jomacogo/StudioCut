@@ -78,11 +78,26 @@ python empaquetar.py
 ```
 
 Genera `dist/studiocut-ai-<versión>.zip`, actualiza el `sha256` y la `url` de
-`plugin.json`. Después:
+`plugin.json`.
 
-1. Sube el ZIP a una **Release** de GitHub con la etiqueta `v<versión>`.
-2. Sube el `plugin.json` actualizado a la rama `main`.
-3. En Studio Cut pulsa **«🔄 Buscar actualización»**.
+### Publicar (automático)
+
+Con GitHub CLI instalado y la sesión iniciada (`gh auth login`):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File publicar.ps1
+```
+
+El script empaqueta, crea (si hace falta) el repositorio
+`Jomacogo/StudioCut-AI`, sube `main`, publica la Release `v<versión>` con el
+ZIP y verifica que el `plugin.json` público coincide con el SHA-256 local.
+
+### Publicar (manual)
+
+1. Crea el repositorio `Jomacogo/StudioCut-AI` (público).
+2. Sube el contenido de esta carpeta a `main`.
+3. Crea una **Release** con la etiqueta `v<versión>` y adjunta el ZIP.
+4. En Studio Cut pulsa **«🔄 Buscar actualización»**.
 
 ## Licencia
 

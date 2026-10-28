@@ -4,7 +4,7 @@
   "descripcion": "Complemento MCP de Studio Cut: guiones, imágenes y voz con IA para tus videos.",
   "autor": "Jomacogo",
   "url": "https://github.com/Jomacogo/StudioCut-AI/releases/download/v1.0.0/studiocut-ai-1.0.0.zip",
-  "sha256": "f5dedf610170b8c464ef31261d9373128371c5500b887bf00317ffab225c329d",
+  "sha256": "f9fd62e1c04ea747020627bc4bdc28dda46889d250b93261345ec3961d384289",
   "min_app": "1.0.0",
   "comando": [
     "python",
