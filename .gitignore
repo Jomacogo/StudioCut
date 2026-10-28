@@ -1,0 +1,57 @@
+# ---------------------------------------------------------------- Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+venv/
+.venv/
+env/
+ENV/
+
+# ------------------------------------------- Configuración y credenciales
+# Tokens de YouTube, audios TTS generados, modelo Vosk descargado, etc.
+.config/
+ui/.config/
+core/.config/
+*_token.json
+client_secret*.json
+
+# ------------------------------------------------------- Medios y salidas
+# Archivos de audio, video, imágenes y subtítulos generados o del usuario.
+*.mp3
+*.m4a
+*.aac
+*.wav
+*.flac
+*.ogg
+*.opus
+*.wma
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.bmp
+*.ass
+*.srt
+*.vtt
+
+# --------------------------------------------------- Proyectos y copias
+*.stcut
+*.bak
+*.tmp
+*.log
+
+# ---------------------------------------------------------------- Sistema
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---------------------------------------------- Metadatos locales (Freebuff)
+.freebuff/
