@@ -182,8 +182,52 @@ class TrabajadorVoz(QThread):
             self.fallo.emit(str(exc))
 
 
+class TrabajadorIA(QThread):
+    """Ejecuta el flujo de IA (guion → imágenes → voz) sin bloquear la UI."""
+
+    progreso = pyqtSignal(int, str)   # porcentaje, etapa
+    log = pyqtSignal(str)
+    guion = pyqtSignal(str, object)   # texto, Guion
+    imagenes = pyqtSignal(list)       # rutas generadas
+    voz = pyqtSignal(str)             # ruta del audio
+    listo = pyqtSignal(object)        # ResultadoIA
+    fallo = pyqtSignal(str)
+
+    def __init__(self, idea: str, cfg, claves: dict, carpeta: str, parent=None):
+        super().__init__(parent)
+        self._idea = idea
+        self._cfg = cfg
+        self._claves = dict(claves or {})
+        self._carpeta = carpeta
+        self._cancelar_ev = threading.Event()
+
+    def cancelar(self) -> None:
+        self._cancelar_ev.set()
+
+    def run(self) -> None:  # pragma: no cover - hilo
+        try:
+            from core.ia.pipeline import ejecutar_pipeline
+
+            resultado = ejecutar_pipeline(
+                self._idea,
+                self._cfg,
+                self._claves,
+                self._carpeta,
+                al_progreso=lambda p, e: self.progreso.emit(p, e),
+                al_log=lambda m: self.log.emit(m),
+                cancelar=self._cancelar_ev,
+                al_guion=lambda texto, guion: self.guion.emit(texto, guion),
+                al_imagenes=lambda rutas: self.imagenes.emit(list(rutas)),
+                al_voz=lambda ruta: self.voz.emit(ruta),
+            )
+            self.listo.emit(resultado)
+        except Exception as exc:  # noqa: BLE001
+            self.fallo.emit(str(exc))
+
+
 class DetectorCapitulos(QThread):
     """Transcribe el audio (Vosk offline) y localiza los capítulos."""
+
     progreso = pyqtSignal(int, str)   # porcentaje, etapa
     log = pyqtSignal(str)
     listo = pyqtSignal(list)          # [{titulo, tiempo}]

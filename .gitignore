@@ -53,5 +53,8 @@ Thumbs.db
 desktop.ini
 .DS_Store
 
+# ------------------------------------------ Complemento empaquetado
+complemento/dist/
+
 # ---------------------------------------------- Metadatos locales (Freebuff)
 .freebuff/

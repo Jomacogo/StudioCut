@@ -1,0 +1,19 @@
+{
+  "nombre": "StudioCut AI",
+  "version": "1.0.0",
+  "descripcion": "Complemento MCP de Studio Cut: guiones, imágenes y voz con IA para tus videos.",
+  "autor": "Jomacogo",
+  "url": "https://github.com/Jomacogo/StudioCut-AI/releases/download/v1.0.0/studiocut-ai-1.0.0.zip",
+  "sha256": "f5dedf610170b8c464ef31261d9373128371c5500b887bf00317ffab225c329d",
+  "min_app": "1.0.0",
+  "comando": [
+    "python",
+    "-m",
+    "studiocut_ai",
+    "--stdio"
+  ],
+  "permisos": [
+    "Conectarse a internet para hablar con OpenRouter, Pollinations y ElevenLabs",
+    "Guardar imágenes y audios en %LOCALAPPDATA%\\StudioCut\\mcp_salidas"
+  ]
+}

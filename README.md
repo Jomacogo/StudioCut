@@ -82,7 +82,74 @@ cambian con su efecto en cada marca.
 > Voz → Añadir voces). Si tu voz de Clipchamp no aparece, instala ese
 > paquete de voz y la app la tomará sola.
 
-## Subida automática a YouTube (solo con título) 
+## Inteligencia artificial (casi automática)
+
+La pestaña **«🤖 IA»** crea un video completo desde una sola idea:
+
+1. Escribe el tema y pulsa **«⚡ Generar todo automáticamente»**.
+2. La app genera el **guion** con estructura `Introducción` → `Capítulo uno`,
+   `Capítulo dos`… → `Cierre` (así Vosk los reconoce después).
+3. Genera **una imagen por capítulo** con los nombres `intro_*`,
+   `capitulo_NN_*` y `cierre_*`, de modo que se asignan solas a las marcas.
+4. Genera la **voz** del guion y detecta capítulos y subtítulos.
+5. Si quieres, pulsa **«✨ Generar solo el guion»** para revisarlo antes.
+
+### Texto (guion)
+
+- **OpenRouter** con `nvidia/nemotron-3-ultra-550b-a55b:free` por defecto.
+  Si el modelo gratuito falla, prueba automáticamente otros modelos gratis.
+- También admite cualquier API **OpenAI-compatible** (Groq, DeepSeek…) y
+  **Ollama local** sin clave.
+- El guion se repara una vez si el modelo olvida el cierre o devuelve
+  encabezados con markdown.
+
+### Imágenes
+
+- **Pollinations · Flux** por defecto: gratis y sin clave (limita a 1 imagen
+  cada 45 s; la app espera y reintenta sola).
+- **OpenRouter · Gemini** y **OpenAI · gpt-image** como opciones de pago.
+- Si el proveedor de pago falla, se reintenta con Pollinations si está
+  marcado «usar Pollinations gratis».
+- Estilos: cinematográfico, ilustración, 3D, minimalista, acuarela y futurista.
+
+### Voz
+
+- **Windows / Edge** con las voces neuronales de siempre (Jorge es-MX).
+- **ElevenLabs** solo si tienes cuenta: guarda la clave, carga tus voces y
+  elige una. Si falla o no hay clave, se usa el TTS de Windows sin cortar
+  el flujo.
+
+### Claves y privacidad
+
+Las claves se guardan **cifradas con DPAPI de Windows** en
+`ui/.config/ia_credenciales.json` (excluido por `.gitignore`). Nunca se
+escriben en el proyecto `.stcut`, en `QSettings`, en los logs ni en el
+repositorio. Solo las puede descifrar tu usuario de Windows en ese equipo.
+Puedes borrarlas con el botón **«Borrar»**.
+
+## Complemento MCP (opcional)
+
+El complemento permite que un agente externo (Claude Desktop, Cursor…) use
+las mismas capacidades de IA de Studio Cut. Se instala **solo desde la
+pestaña «🤖 IA»**:
+
+1. **«⬇ Buscar e instalar»**: lee el `plugin.json` publicado, descarga el ZIP
+   y **verifica el SHA-256** antes de instalar.
+2. **«📁 Desde carpeta…»**: instala una copia local para probar antes de
+   publicar.
+3. **«▶ Probar»**: arranca el servidor y comprueba que responde.
+4. **«📋 Copiar configuración MCP»**: copia el JSON para tu cliente.
+
+Detalles de seguridad:
+
+- Se instala en `%LOCALAPPDATA%\StudioCut\plugins\studiocut-ai\<versión>`.
+- La extracción rechaza rutas `../`, enlaces simbólicos y ZIP gigantes.
+- El servidor exige `--stdio` y la variable `STUDIOCUT_LAUNCH_TOKEN`; el token
+  solo lo genera Studio Cut al lanzarlo. Abrirlo con doble clic no hace nada.
+- El complemento vive en un repositorio aparte
+  (`Jomacogo/StudioCut-AI`) para poder actualizarlo sin tocar la app.
+
+## Subida automática a YouTube (solo con título)
 
 Al momento de generar o subir se completan Título, Descripción, Etiquetas y
 (opcionalmente) una **miniatura**; el video sube **exactamente con lo que
@@ -140,9 +207,13 @@ core/project.py     gestor de proyectos (.stcut) estilo DaVinci / Premiere
 core/voz_tts.py     TTS de Windows: voces en español («Jorge» es-MX)
 core/renderer.py    filtros ffmpeg: zoompan + xfade/acrossfade; modo con marcas
 core/youtube_uploader.py  OAuth + subida resumable a la Data API v3
+core/ia/            guion, imágenes, voz y pipeline de IA (sin dependencias nuevas)
+core/plugins.py     instalación verificada del complemento MCP
 ui/main_window.py   workspace profesional NLE
+ui/widgets/panel_ia.py     pestaña «🤖 IA» y gestor del complemento
 ui/widgets/timeline.py     timeline interactivo con pistas y playhead
 ui/widgets/monitor.py      motor de previsualización en vivo (audio + Ken Burns + crossfade)
-ui/trabajador.py    QThreads: render, subida y detección de capítulos
+ui/trabajador.py    QThreads: render, subida, detección de capítulos e IA
+complemento/        fuente del complemento MCP (repo StudioCut-AI)
 styles.qss          tema oscuro NLE Studio
 ```

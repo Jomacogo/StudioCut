@@ -8,14 +8,16 @@ import re
 import unicodedata
 from pathlib import Path
 
-# Palabras que indican la introducción (van primero, orden -1)
+# Palabras que indican la introducción (van primero, orden -1).
+# Se usan lookarounds en vez de \b para que también funcionen con guiones
+# bajos: "intro_20260101_120000" debe clasificarse como introducción.
 _INTRO_PATRON = re.compile(
-    r"\b(intro|intro\d*|introduc\w*|prologo|prefacio|presentacion|incipit)\b"
+    r"(?<![a-z0-9])(intro|intro\d*|introduc\w*|prologo|prefacio|presentacion|incipit)(?![a-z0-9])"
 )
 
 # Palabras que indican el cierre (van al final)
 _CIERRE_PATRON = re.compile(
-    r"\b(cierre|outro|final|fin|despedida|conclusion|epilogo)\b"
+    r"(?<![a-z0-9])(cierre|outro|final|fin|despedida|conclusion|epilogo)(?![a-z0-9])"
 )
 
 # Extrae número de capítulo: "capítulo 3", "capitulo3", "cap_03", "3"

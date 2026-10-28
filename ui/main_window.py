@@ -31,6 +31,8 @@ from PyQt6.QtWidgets import (
 from core import ordering
 from core.chapter_detection import ConfigDeteccion
 from core.effects import DIRECCIONES, TIPOS_EFECTO, ConfigEfecto
+from core.ia.guion import marcas_estimadas
+from core.ia.pipeline import ConfigIA
 from core.media import duracion_audio, ErrorMedia
 from core.project import (
     cargar_proyecto, guardar_proyecto, EXTENSION_PROYECTO, FILTRO_PROYECTO, ErrorProyecto
@@ -42,6 +44,7 @@ from core.subtitles import (
 )
 from ui.trabajador import DetectorCapitulos, Trabajador, TrabajadorVoz
 from ui.widgets.monitor import MonitorWidget
+from ui.widgets.panel_ia import PanelIA
 from ui.widgets.timeline import LineaDeTiempoWidget
 
 AUDIO_EXT = "*.mp3 *.m4a *.aac *.wav *.flac *.ogg *.opus *.wma"
@@ -186,6 +189,10 @@ class VentanaPrincipal(QMainWindow):
         self._color_sub = "#FFFFFF"
         self._color_borde_sub = "#000000"
         self._color_caja_sub = "#000000"
+
+        # Inteligencia artificial
+        self._ia_config = ConfigIA()
+        self._ia_marcas_pendientes: list[dict] = []
 
         # Gestión de proyecto propio (.stcut)
         self._ruta_proyecto: Path | None = None
@@ -862,6 +869,10 @@ class VentanaPrincipal(QMainWindow):
         lay_outer_yt.addWidget(scroll_yt)
 
         self.tabs_inspector.addTab(w_yt, "🚀 YouTube")
+
+        # Pestaña 5: Inteligencia Artificial
+        self.panel_ia = PanelIA(self)
+        self.tabs_inspector.addTab(self.panel_ia, "🤖 IA")
 
         lay.addWidget(self.tabs_inspector, 1)
         return panel
@@ -2301,6 +2312,8 @@ class VentanaPrincipal(QMainWindow):
             "quemar_subtitulos": self.chk_quemar_subtitulos.isChecked(),
             "mostrar_subtitulos": self.chk_sub_mostrar.isChecked(),
             "sub_auto": self.chk_sub_auto.isChecked(),
+            # Inteligencia artificial (nunca incluye claves)
+            "ia": self._ia_config.a_dict(),
             "youtube": {
                 "titulo": self.txt_titulo.text(),
                 "descripcion": self.txt_desc.toPlainText(),
@@ -2373,6 +2386,11 @@ class VentanaPrincipal(QMainWindow):
             self.chk_sub_auto.setChecked(bool(datos["sub_auto"]))
         self._refrescar_tabla_subtitulos()
         self._actualizar_subtitulos_monitor()
+
+        # Inteligencia artificial
+        self._ia_config = ConfigIA.desde_dict(datos.get("ia"))
+        if hasattr(self, "panel_ia"):
+            self.panel_ia.refrescar_desde_config()
 
         yt = datos.get("youtube") or {}
         if yt:
@@ -2673,6 +2691,18 @@ class VentanaPrincipal(QMainWindow):
         self.btn_cancelar.setEnabled(False)
         transcurrido = time.monotonic() - self._t0_deteccion
         self.barra.setValue(100)
+
+        # Si Vosk no reconoce todos los encabezados, usar los tiempos del guion.
+        if self._ia_marcas_pendientes:
+            pendientes = list(self._ia_marcas_pendientes)
+            self._ia_marcas_pendientes = []
+            if not marcas or len(marcas) < max(2, len(pendientes) - 1):
+                marcas = pendientes
+                self.log.appendPlainText(
+                    "[IA] Vosk no reconoció todos los capítulos; se usan los "
+                    "tiempos estimados a partir del guion."
+                )
+
         if marcas:
             self.marcas = marcas
             self.img_manual.clear()
@@ -3086,6 +3116,63 @@ class VentanaPrincipal(QMainWindow):
         self.lbl_estado.setText("Error generando la voz. Revisa la consola.")
         self.log.appendPlainText(f"ERROR: {mensaje}")
 
+    # -------------------------------------------------------------- IA
+    def _ia_aplicar_guion(self, texto: str) -> None:
+        """Coloca el guion generado en el panel de Texto → voz."""
+        self.txt_script.setPlainText(texto)
+        if self.combo_modo.currentIndex() != 2:
+            self.combo_modo.setCurrentIndex(2)
+        else:
+            self._aplicar_modo()
+        self._proyecto_modificado = True
+        self._actualizar_titulo_proyecto()
+        self.lbl_estado.setText("Guion de IA insertado. Generando la voz…")
+        self._guardar_sesion()
+
+    def _ia_aplicar_imagenes(self, rutas: list[str]) -> None:
+        """Sustituye las imágenes generadas por IA y refresca la línea de tiempo."""
+        carpeta_ia = (CARPETA_CFG / "imagenes_generadas").resolve()
+
+        def es_ia(ruta: str) -> bool:
+            try:
+                return Path(ruta).resolve().parent == carpeta_ia
+            except OSError:
+                return False
+
+        self.imagenes = [r for r in self.imagenes if not es_ia(r)]
+        self.img_manual = {
+            k: v for k, v in self.img_manual.items() if not es_ia(v)
+        }
+        for ruta in rutas:
+            ruta = str(ruta)
+            if Path(ruta).exists() and ruta not in self.imagenes:
+                self.imagenes.append(ruta)
+
+        self.lista_imagenes.clear()
+        for ruta in self.imagenes:
+            if Path(ruta).exists():
+                item = QListWidgetItem(QIcon(ruta), Path(ruta).name)
+                item.setData(Qt.ItemDataRole.UserRole, ruta)
+                item.setToolTip(ruta)
+                self.lista_imagenes.addItem(item)
+
+        self._proyecto_modificado = True
+        self._actualizar_titulo_proyecto()
+        self._actualizar_timeline_y_monitor()
+        self._guardar_sesion()
+
+    def _ia_aplicar_voz(self, ruta_wav: str, guion=None) -> None:
+        """Usa el audio de IA y deja preparados los tiempos estimados del guion."""
+        self._ia_marcas_pendientes = []
+        if guion is not None:
+            try:
+                self._ia_marcas_pendientes = marcas_estimadas(
+                    guion, duracion_audio(ruta_wav)
+                )
+            except Exception:  # noqa: BLE001
+                self._ia_marcas_pendientes = []
+        self._voz_lista(ruta_wav)
+
     # ------------------------------------------------------------- Sesión
     def _guardar_sesion(self) -> None:
         self._ajustes.setValue("audios", self.audios)
@@ -3115,11 +3202,21 @@ class VentanaPrincipal(QMainWindow):
         self._ajustes.setValue("det_max", self.spin_det_max.value())
         self._ajustes.setValue("img_manual", json.dumps({str(k): v for k, v in self.img_manual.items()}))
         self._ajustes.setValue("ruta_proyecto", str(self._ruta_proyecto) if self._ruta_proyecto else "")
+        # Configuración de IA (sin claves)
+        self._ajustes.setValue(
+            "ia_config", json.dumps(self._ia_config.a_dict(), ensure_ascii=False)
+        )
 
     def _cargar_sesion(self) -> None:
         self.audios = list(self._ajustes.value("audios") or [])
         self.imagenes = list(self._ajustes.value("imagenes") or [])
         self.marcas = list(self._ajustes.value("marcas") or [])
+        try:
+            self._ia_config = ConfigIA.desde_dict(
+                json.loads(str(self._ajustes.value("ia_config") or "{}"))
+            )
+        except Exception:  # noqa: BLE001
+            self._ia_config = ConfigIA()
         raw_manual = self._ajustes.value("img_manual")
         if raw_manual:
             try:
@@ -3211,6 +3308,8 @@ class VentanaPrincipal(QMainWindow):
         self._refrescar_marcas()
         if modo == 0:
             self._reordenar()
+        if hasattr(self, "panel_ia"):
+            self.panel_ia.refrescar_desde_config()
         self._actualizar_titulo_proyecto()
         self._actualizar_timeline_y_monitor()
         self._guardar_sesion()
