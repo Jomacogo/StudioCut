@@ -108,9 +108,28 @@ La pestaña **«🤖 IA»** crea un video completo desde una sola idea:
 - **Pollinations · Flux** por defecto: gratis y sin clave (limita a 1 imagen
   cada 45 s; la app espera y reintenta sola).
 - **OpenRouter · Gemini** y **OpenAI · gpt-image** como opciones de pago.
+- **IA local** (ComfyUI o Forge/AUTOMATIC1111) si tu GPU cumple los
+  requisitos: sin coste por imagen y sin enviar nada a internet. Ver
+  [IA local](#ia-local-generar-imágenes-en-tu-propio-pc).
 - Si el proveedor de pago falla, se reintenta con Pollinations si está
   marcado «usar Pollinations gratis».
 - Estilos: cinematográfico, ilustración, 3D, minimalista, acuarela y futurista.
+
+### Miniatura y prompts de cada imagen
+
+En el bloque **«Materiales y prompts visuales»** del asistente de IA:
+
+- **Mi plantilla de miniatura** — si escribes ahí un prompt, se usa para
+  **todas** las miniaturas en lugar de dejar que la IA lo improvise. Admite
+  los marcadores `{titulo}` y `{tema}`, que se sustituyen al generar. El botón
+  **«Usar el ejemplo de mi canal»** rellena la plantilla con el estilo de
+  estatua de mármol, fondo negro y tipografía dorada.
+- **Prompt de la miniatura actual** — lo que realmente se envía al generar o
+  regenerar esa miniatura; se puede editar a mano.
+- **«Mostrar los prompts de cada imagen (avanzado)»** — desmarcado, la IA
+  crea el prompt de cada capítulo y lo coloca en el video sin mostrarlo.
+  Marcado, aparece la lista de secciones para revisar o cambiar cada prompt y
+  regenerar una escena concreta. La preferencia se guarda en el proyecto.
 
 ### Voz
 
@@ -131,7 +150,7 @@ Puedes borrarlas con el botón **«Borrar»**.
 
 El complemento permite que un agente externo (Claude Desktop, Cursor…) use
 las mismas capacidades de IA de Studio Cut. Se instala **solo desde la
-pestaña «🤖 IA»**:
+asistente de IA (menú **Ajustes** o **Ventanas → Asistente de IA**)**:
 
 1. **«⬇ Buscar e instalar»**: lee el `plugin.json` publicado, descarga el ZIP
    y **verifica el SHA-256** antes de instalar.
@@ -149,11 +168,87 @@ Detalles de seguridad:
 - El complemento vive en un repositorio aparte
   (`Jomacogo/StudioCut-AI`) para poder actualizarlo sin tocar la app.
 
-## Subida automática a YouTube (solo con título)
+## IA local: generar imágenes en tu propio PC
 
-Al momento de generar o subir se completan Título, Descripción, Etiquetas y
-(opcionalmente) una **miniatura**; el video sube **exactamente con lo que
-escribiste** en esos campos.
+Studio Cut puede generar las imágenes con un programa instalado en tu
+equipo. No hay coste por imagen ni se sube nada a internet; el precio es la
+velocidad: cada imagen tarda entre 20 y 90 segundos según la tarjeta.
+
+**Requisitos** (el panel los comprueba solo al abrir el asistente):
+
+| | Mínimo | Cómodo |
+|---|---|---|
+| GPU | NVIDIA con **6 GB** de VRAM | 10 GB o más |
+| RAM | 12 GB | 16 GB o más |
+
+Con **8 GB de VRAM** (RTX 4060 Ti, 3060 Ti, 3070…) funciona:
+
+- **SDXL** a 1024² en fp16, o **SDXL-Turbo/Lightning** (4-8 pasos, muy rápido).
+- **Flux.1-schnell** en **fp8 o GGUF Q4** (~6,8 GB de VRAM). Mejor calidad de
+  texto y composición; más lento que SDXL-Turbo.
+- Con 10 GB o más: Flux fp8 con más margen y SDXL con refiner.
+
+**Instalación** (una vez):
+
+1. Instala **ComfyUI** (recomendado) o **Forge / AUTOMATIC1111** para Windows.
+2. Descarga un checkpoint que quepa en tu VRAM y colócalo en
+   `ComfyUI/models/checkpoints` (`sdxl-turbo.safetensors`,
+   `flux1-schnell-fp8.safetensors`…).
+3. Abre ComfyUI y déjalo abierto: escucha en `http://127.0.0.1:8188`.
+   En Forge, arranca con `--api` (escucha en `:7860`).
+4. En la app: **Imágenes → proveedor «IA local en tu PC»**, pulsa
+   **«🔍 Buscar programa»**, elige el modelo y **«▶ Probar»**.
+
+Detalles útiles:
+
+- La app **no descarga modelos** ni arranca el servidor por su cuenta: solo
+  se conecta a `127.0.0.1` y avisa con un mensaje claro si no hay nada
+  escuchando. Por seguridad rechaza cualquier dirección que no sea local.
+- Las imágenes locales se generan **de una en una**: comparten una sola GPU
+  y lanzar dos a la vez solo provoca errores de memoria.
+- **Flux en GGUF, LoRAs o workflows propios**: en ComfyUI usa
+  *Workflow → Export (API)*, guarda el JSON y elígelo en el campo
+  **«Workflow»**. La app inyecta el prompt, el tamaño, la semilla y los pasos
+  en ese workflow (primer nodo de texto = positivo, segundo = negativo).
+- Si el backend falla, se puede mantener marcado «usar Pollinations gratis»
+  como red de seguridad.
+
+## Ventanas y menús
+
+El editor conserva en el inspector **Ajustes Video**, **Detección** y
+**Subtítulos**. La IA y YouTube viven en ventanas aparte que se abren desde
+la barra de menús, no desde botones fijos: la cabecera queda despejada.
+
+- **Archivo** — nuevo, abrir, guardar, guardar como, añadir audios/imágenes,
+  exportar MP4 y salir.
+- **Editar** — deshacer, rehacer y detectar capítulos.
+- **Ajustes** — asistente de IA y claves, publicación en YouTube y
+  comprobación de requisitos de la IA local.
+- **Ventanas** — abrir el asistente de IA (`Ctrl+I`), YouTube
+  (`Ctrl+Shift+Y`) o cerrar las ventanas flotantes (`Ctrl+Shift+W`).
+- **Ayuda** — guía rápida (`F1`), instalar la IA local y «Acerca de».
+
+Las dos ventanas trabajan sobre el mismo proyecto, guion y metadatos; puedes
+tenerlas abiertas junto al editor o cerrarlas sin perder nada.
+
+## YouTube: conectar una vez, publicar y editar
+
+Al generar o subir se completan Título, Descripción, Etiquetas, **idioma**,
+privacidad y (opcionalmente) una **miniatura**; el video sube **exactamente
+con lo que escribiste** en esos campos.
+
+La ventana está dividida en cuatro secciones: **Cuenta**, **Metadatos**,
+**Publicación** y **Editar un video ya publicado**.
+
+- **Idioma del video** → se envía como `snippet.defaultLanguage` (por ejemplo
+  `es`). Ayuda a que YouTube indexe bien el video y a las traducciones.
+- **Programar publicación** → marca la casilla y elige fecha y hora. El video
+  se sube **privado** y YouTube lo publica solo en ese momento (`publishAt`).
+  Mientras la casilla esté marcada, la privacidad queda bloqueada en *Privado*
+  porque YouTube lo exige. Desmárcala y guarda para **cancelar** una
+  programación.
+- **Desconectar** borra la autorización guardada en el equipo (no toca tus
+  videos ni el proyecto).
 
 - **Con título lleno** → al terminar el render se sube a YouTube con
   título/descripción/miniatura tal cual.
@@ -179,22 +274,50 @@ Configuración (una sola vez):
    mínimo; en **Usuarios de prueba** añade la cuenta de Gmail de tu canal.
 4. **Credenciales → Crear credenciales → ID de cliente OAuth** → tipo
    *Aplicación de escritorio* → descarga el JSON.
-5. **En la misma pantalla del cliente OAuth**, en **URIs de redirección
-   autorizados**, añade EXACTAMENTE:
-   ```
-   http://localhost:8080/
-   ```
-   (La app usa el puerto fijo 8080; si no lo añades, Google rechaza la
-   solicitud con `redirect_uri_mismatch`.)
-6. En la app: marca *Subir a YouTube al terminar* → **Buscar…** → elige el
-   `client_secret.json` que descargaste.
-7. La primera subida abrirá el navegador para iniciar sesión con la cuenta
-   del canal (ojo: usa la cuenta del canal, no otra). El token queda
-   guardado y las siguientes subidas no preguntan nada.
+5. No hace falta registrar una URI de redirección: los clientes de tipo
+   *Aplicación de escritorio* usan un puerto local aleatorio
+   (`http://127.0.0.1:…`).
+6. En la app, abre **Ventanas → YouTube** → **Configurar…** → elige el
+   `client_secret.json` y pulsa **🔗 Conectar cuenta**.
+7. El navegador se abrirá una sola vez para autorizar la cuenta del canal
+   (ojo: usa la cuenta del canal, no otra). El token queda guardado cifrado
+   en este equipo y ya puedes **subir**, **cargar tus videos** y **guardar
+   cambios** de título, descripción, etiquetas, idioma, privacidad, fecha
+   programada y miniatura sin volver a autorizar.
 
-> Nota: videos subidos con la API quedan **ocultos (unlisted)** por defecto.
-> Cámbialos a público desde YouTube Studio (es una protección típica para
-> cuentas de prueba) o haciendo la app de Google *en producción*.
+> Notas:
+> - El permiso solicitado permite publicar y **editar** videos; si conectaste
+>   la cuenta con una versión anterior, vuelve a pulsar «Conectar cuenta» una
+>   vez para ampliarlo.
+> - La privacidad se elige en el panel (Privado / Oculto / Público). Los
+>   videos nuevos se suben con la que tengas seleccionada.
+> - Si la app de Google está en modo *Prueba*, solo autorizan las cuentas
+>   añadidas como **Usuarios de prueba** y la autorización caduca a los 7 días.
+> - Editar un video reenvía también categoría, idioma y ajustes de estado que
+>   el formulario no muestra, para no borrarlos.
+
+## Editor: deshacer, onda real y velocidad
+
+- **Deshacer / Rehacer** — botones **↶ ↷** en la barra de la línea de tiempo y
+  **Ctrl+Z / Ctrl+Y** (también Ctrl+Shift+Z). Guarda hasta 40 instantáneas del
+  proyecto; se reinicia al abrir o crear uno nuevo. Usa un temporizador que
+  compara una huella barata del proyecto, así que no penaliza la edición.
+- **Forma de onda real** en la pista **A1** (antes era decorativa). Se calcula
+  con FFmpeg en un hilo aparte y se guarda en `ui/.config/wavecache/`; al
+  reabrir el proyecto se dibuja al instante. Mientras se analiza, la pista
+  muestra una línea base con el aviso «analizando forma de onda…».
+- **Duraciones de audio en caché** — `ffprobe` tarda ~100 ms por archivo y se
+  consultaba decenas de veces (tabla, timeline, subtítulos). Ahora se memoriza
+  por ruta + fecha + tamaño: la segunda consulta tarda **0,17 ms**.
+- **Miniaturas ligeras** — las listas y combos de imágenes usan iconos de
+  112×63 cacheados en lugar de cargar el archivo completo: menos RAM y listas
+  que se abren al instante.
+- **Monitor con imágenes reducidas** — la previsualización escala a 1600 px de
+  ancho y limita la caché a 120 imágenes; el render final sigue usando los
+  originales.
+- **Imágenes de la IA en paralelo** — el pipeline genera 3 imágenes a la vez
+  (2 con Pollinations por su límite gratuito) manteniendo el orden de los
+  capítulos: 8 imágenes pasan de 9,6 s a 3,6 s en la prueba de humo.
 
 ## Estructura
 
@@ -202,7 +325,10 @@ Configuración (una sola vez):
 main.py             punto de entrada
 core/ordering.py    orden intro/capítulos + emparejado audios↔imágenes
 core/chapter_detection.py  transcripción Vosk + parseo de «capítulo N»
-core/media.py       ffprobe/ffmpeg helpers
+core/media.py       ffprobe/ffmpeg helpers (duraciones cacheadas)
+core/hardware.py    detección de GPU/VRAM/RAM para la IA local
+core/ia/local.py    cliente de ComfyUI y Forge/A1111 por HTTP local
+core/waveform.py    picos de audio para la forma de onda del timeline (con caché)
 core/project.py     gestor de proyectos (.stcut) estilo DaVinci / Premiere
 core/voz_tts.py     TTS de Windows: voces en español («Jorge» es-MX)
 core/renderer.py    filtros ffmpeg: zoompan + xfade/acrossfade; modo con marcas
@@ -210,10 +336,11 @@ core/youtube_uploader.py  OAuth + subida resumable a la Data API v3
 core/ia/            guion, imágenes, voz y pipeline de IA (sin dependencias nuevas)
 core/plugins.py     instalación verificada del complemento MCP
 ui/main_window.py   workspace profesional NLE
-ui/widgets/panel_ia.py     pestaña «🤖 IA» y gestor del complemento
-ui/widgets/timeline.py     timeline interactivo con pistas y playhead
+ui/widgets/panel_ia.py     ventana «🤖 IA» y gestor del complemento
+ui/widgets/timeline.py     timeline interactivo con pistas, playhead y onda real
+ui/widgets/miniaturas.py   iconos de lista escalados y cacheados
 ui/widgets/monitor.py      motor de previsualización en vivo (audio + Ken Burns + crossfade)
-ui/trabajador.py    QThreads: render, subida, detección de capítulos e IA
+ui/trabajador.py    QThreads: render, subida, detección de capítulos, IA y onda
 complemento/        fuente del complemento MCP (repo StudioCut-AI)
 styles.qss          tema oscuro NLE Studio
 ```

@@ -29,6 +29,26 @@ except ImportError:
     MULTIMEDIA_DISPONIBLE = False
 
 
+ANCHO_MAX_PREVIEW = 1600
+LIMITE_CACHE_IMAGENES = 120
+
+
+def _pixmap_preview(ruta: str) -> QPixmap | None:
+    """Carga la imagen reducida para el monitor.
+
+    El render final usa siempre el archivo original; la previsualización no
+    necesita 4K y así se evitan cientos de MB de RAM con proyectos grandes.
+    """
+    pix = QPixmap(ruta)
+    if pix.isNull():
+        return None
+    if pix.width() > ANCHO_MAX_PREVIEW:
+        pix = pix.scaledToWidth(
+            ANCHO_MAX_PREVIEW, Qt.TransformationMode.SmoothTransformation
+        )
+    return pix
+
+
 class MonitorWidget(QWidget):
     solicitar_tiempo = pyqtSignal(float)
     probar_estilo_click = pyqtSignal()
@@ -184,13 +204,27 @@ class MonitorWidget(QWidget):
         layout.addLayout(barra_transporte)
 
     # ------------------------------------------------------------- Configuración en Vivo
+    def cache_imagen(self, ruta: str) -> QPixmap | None:
+        """Devuelve la imagen de previsualización cacheada (escalada)."""
+        if not ruta:
+            return None
+        existente = self._cache_pixmaps.get(ruta)
+        if existente is not None:
+            return existente
+        if not Path(ruta).exists():
+            return None
+        pix = _pixmap_preview(ruta)
+        if pix is None:
+            return None
+        if len(self._cache_pixmaps) >= LIMITE_CACHE_IMAGENES:
+            self._cache_pixmaps.clear()
+        self._cache_pixmaps[ruta] = pix
+        return pix
+
     def set_todas_las_imagenes(self, rutas: list[str]) -> None:
         self._todas_las_imagenes = list(rutas)
         for r in rutas:
-            if r and r not in self._cache_pixmaps and Path(r).exists():
-                pix = QPixmap(r)
-                if not pix.isNull():
-                    self._cache_pixmaps[r] = pix
+            self.cache_imagen(r)
         if self._todas_las_imagenes and not self._ruta_imagen_actual:
             self._ruta_imagen_actual = self._todas_las_imagenes[0]
         self.pantalla.update()
@@ -209,11 +243,7 @@ class MonitorWidget(QWidget):
 
         # Pre-cargar imágenes en cache
         for s in self._segmentos:
-            img_p = s.get("imagen", "")
-            if img_p and img_p not in self._cache_pixmaps and Path(img_p).exists():
-                pix = QPixmap(img_p)
-                if not pix.isNull():
-                    self._cache_pixmaps[img_p] = pix
+            self.cache_imagen(s.get("imagen", ""))
 
         # Actualizar audio en QMediaPlayer
         if ruta_audio and Path(ruta_audio).exists():
@@ -245,10 +275,7 @@ class MonitorWidget(QWidget):
         self._ruta_imagen_actual = ruta
         if capitulo:
             self._capitulo_actual = capitulo
-        if ruta and ruta not in self._cache_pixmaps and Path(ruta).exists():
-            pix = QPixmap(ruta)
-            if not pix.isNull():
-                self._cache_pixmaps[ruta] = pix
+        self.cache_imagen(ruta)
         self.pantalla.update()
 
     def set_tiempo(self, seg: float, dur_total: float | None = None) -> None:
@@ -510,15 +537,7 @@ class PantallaCanvas(QFrame):
             p.drawText(rect_cap, Qt.AlignmentFlag.AlignCenter, texto_cap)
 
     def _obtener_pixmap(self, ruta: str) -> QPixmap | None:
-        if not ruta or not Path(ruta).exists():
-            return None
-        if ruta not in self._monitor._cache_pixmaps:
-            pix = QPixmap(ruta)
-            if not pix.isNull():
-                self._monitor._cache_pixmaps[ruta] = pix
-            else:
-                return None
-        return self._monitor._cache_pixmaps.get(ruta)
+        return self._monitor.cache_imagen(ruta)
 
     def _dibujar_imagen_transformada(self, p: QPainter, pix: QPixmap,
                                      rect_destino: QRectF, zoom: float,

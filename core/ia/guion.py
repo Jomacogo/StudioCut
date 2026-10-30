@@ -146,6 +146,15 @@ class Guion:
 
 
 # ------------------------------------------------------------------ Prompt
+PROMPT_CANAL_DEFECTO = """Quiero crear un canal de YouTube de audiolibros y contenido original sobre finanzas, superación personal y temas afines. Los vídeos duran de 30 minutos a más de una hora y se estructuran con Introducción, capítulos numerados y Cierre. Escribe guiones claros, atractivos y naturales para escuchar, con un gancho inicial y transiciones que mantengan el interés.
+
+Prioriza información real y verificable. No inventes hechos, cifras, estudios, citas ni fuentes, ni afirmes haber consultado internet si no se proporcionaron fuentes. Cuando el tema trate un libro, usa ideas y hechos que puedan atribuirse con claridad, distingue los hechos de la interpretación y no reproduzcas capítulos ni fragmentos extensos protegidos: crea una explicación y reflexión originales. Si no puedes comprobar una afirmación o fuente, indícalo para que se revise antes de publicar; el usuario debe aportar el libro, autor o fuente si necesita referencias concretas.
+
+Prepara también materiales para YouTube: varias propuestas de título atractivas pero fieles al contenido, una descripción útil con capítulos y fuentes por verificar cuando corresponda, etiquetas relevantes, un prompt visual por sección y un prompt de miniatura. Buscamos buena presentación y CTR sin promesas engañosas.
+
+Estilo de miniatura de referencia: composición cinematográfica horizontal 16:9, estética dark academia clásica como pintura al óleo renacentista, figura estoica o monje de mármol blanco, fondo casi negro, foco cálido ámbar desde arriba y espacio negativo oscuro a la izquierda para tipografía serif dorada. Atmósfera solemne y autoritativa, muy detallada, sin elementos modernos. Adapta el texto de la miniatura al tema/título de cada vídeo; no uses «MODO MONJE» salvo que ese sea realmente el tema."""
+
+
 def _sistema() -> str:
     return (
         "Eres guionista profesional de videos de YouTube en español. Escribes "
@@ -163,12 +172,14 @@ def construir_prompt(
     tono: str = "cercano y directo",
     publico: str = "público general",
     idioma: str = "español neutro",
+    instrucciones_canal: str = "",
 ) -> str:
     """Prompt estricto para que el guion encaje con el detector de capítulos."""
     idea = (idea or "").strip()
     n_capitulos = max(1, min(int(n_capitulos or 3), 20))
     duracion_min = max(1, min(int(duracion_min or 5), 120))
     palabras_objetivo = duracion_min * 150
+    palabras_por_capitulo = max(220, int((palabras_objetivo - 400) / n_capitulos))
     numeros = ", ".join(_NUMEROS_PALABRA[1: n_capitulos + 1])
 
     lineas = [
@@ -177,22 +188,25 @@ def construir_prompt(
         f"Tema: {idea}",
         f"Tono: {tono}. Público: {publico}.",
         "",
+        "BRIEF EDITABLE DEL CANAL (respeta estas directrices):",
+        (instrucciones_canal or PROMPT_CANAL_DEFECTO).strip(),
+        "",
         "ESTRUCTURA OBLIGATORIA (respétala exactamente):",
         "",
         "Introducción.",
-        "Dos o tres frases que presenten el tema y enganchen al espectador.",
+        "Una introducción de aproximadamente 200 palabras que presente el tema, enganche al espectador y adelante el valor del video.",
         "",
     ]
     for numero in range(1, n_capitulos + 1):
         palabra = _NUMEROS_PALABRA[numero]
         lineas += [
             f"Capítulo {palabra}: Título breve del capítulo.",
-            "Cuatro a ocho frases desarrollando la idea, con un ejemplo concreto.",
+            f"Desarrolla el capítulo en aproximadamente {palabras_por_capitulo} palabras, con explicaciones claras, ejemplos concretos y transiciones naturales.",
             "",
         ]
     lineas += [
         "Cierre.",
-        "Dos o tres frases que resuman y llamen a la acción.",
+        "Un cierre de aproximadamente 200 palabras que sintetice las ideas principales y cierre con una llamada a la acción natural.",
         "",
         "REGLAS ESTRICTAS:",
         "- Escribe los números de los capítulos con letra: "
@@ -387,6 +401,7 @@ def generar_guion(
     tono: str = "cercano y directo",
     publico: str = "público general",
     idioma: str = "español neutro",
+    instrucciones_canal: str = "",
     al_log=None,
     timeout: float = 240.0,
 ) -> Guion:
@@ -401,6 +416,7 @@ def generar_guion(
         tono=tono,
         publico=publico,
         idioma=idioma,
+        instrucciones_canal=instrucciones_canal,
     )
     mensajes = [
         {"role": "system", "content": _sistema()},
@@ -454,6 +470,135 @@ def generar_guion(
             + ". Prueba otro modelo o vuelve a intentarlo."
         )
     return guion
+
+
+def generar_paquete_editorial(
+    idea: str,
+    guion: Guion,
+    *,
+    clave: str,
+    modelo: str = MODELO_TEXTO_DEFECTO,
+    base_url: str = BASE_OPENROUTER,
+    instrucciones_canal: str = "",
+    al_log=None,
+    timeout: float = 180.0,
+) -> dict:
+    """Genera metadatos YouTube y prompts visuales a partir del guion final."""
+    from .proveedores import generar_texto
+    import json
+
+    brief = (instrucciones_canal or PROMPT_CANAL_DEFECTO).strip()
+    bloques = [b for b in guion.bloques if b.texto.strip()]
+    secciones = [b.encabezado for b in bloques]
+    esquema = {
+        "titulos": ["propuesta 1", "propuesta 2", "propuesta 3"],
+        "descripcion": "descripción para YouTube, con capítulos y fuentes que deban verificarse",
+        "etiquetas": ["etiqueta"],
+        "prompt_miniatura": "prompt visual 16:9",
+        "prompts_imagenes": [
+            {"seccion": nombre, "prompt": "prompt visual 16:9 sin texto"}
+            for nombre in secciones
+        ],
+    }
+    solicitud = (
+        "Genera el paquete editorial del vídeo usando el brief y el guion. "
+        "Devuelve exclusivamente un objeto JSON válido con este esquema (sin markdown):\n"
+        + json.dumps(esquema, ensure_ascii=False)
+        + "\nBrief del canal:\n" + brief
+        + "\nTema:\n" + (idea or "")
+        + "\nGuion:\n" + (guion.texto or "")[:24000]
+        + "\nReglas: títulos atractivos pero honestos; descripción en español, "
+        "incluye un índice con los encabezados del guion y fuentes solo si son "
+        "conocidas, nunca inventadas. Si una fuente requiere comprobación, "
+        "márcala como pendiente de verificar. Las etiquetas deben ser una lista "
+        "de frases cortas. Crea exactamente un prompt visual por sección y "
+        "personaliza la miniatura a este tema; no pongas texto dentro de las "
+        "imágenes de capítulos. La miniatura puede reservar espacio para texto, "
+        "pero no afirmes que el modelo dibujará correctamente las letras."
+    )
+    if al_log:
+        al_log("[YouTube] Preparando título, descripción, etiquetas y prompts visuales…")
+    respuesta = generar_texto(
+        [
+            {"role": "system", "content": (
+                "Eres editor de YouTube y director de arte. No inventes fuentes, "
+                "datos ni citas. Devuelve solo JSON válido."
+            )},
+            {"role": "user", "content": solicitud},
+        ],
+        clave=clave,
+        modelo=modelo,
+        base_url=base_url,
+        temperatura=0.55,
+        max_tokens=min(8000, 1000 + len(secciones) * 300),
+        timeout=timeout,
+        al_log=al_log,
+    )
+    texto = (respuesta.get("texto") or "").strip()
+    texto = re.sub(r"^```(?:json)?\s*|\s*```$", "", texto, flags=re.IGNORECASE)
+    try:
+        datos = json.loads(texto)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ErrorIA("La IA devolvió metadatos en un formato no válido.") from exc
+    if not isinstance(datos, dict):
+        raise ErrorIA("El paquete editorial no tiene el formato esperado.")
+    if not datos.get("prompt_miniatura"):
+        datos["prompt_miniatura"] = (
+            "Wide cinematic 16:9 image. Classical dark academia aesthetic, "
+            "resembling a high-quality Renaissance oil painting. A beautifully "
+            "sculpted white marble stoic figure, with its head slightly bowed "
+            "in deep concentration. The background is a pitch-black, moody void "
+            "with a single harsh, warm amber spotlight from above illuminating "
+            "the marble face. Leave elegant dark negative space on the left for "
+            "theme-specific aged-gold serif typography, but do not render text. "
+            "Highly detailed, solemn and authoritative atmosphere, no modern elements."
+        )
+
+    titulos = datos.get("titulos") or []
+    if isinstance(titulos, str):
+        titulos = [titulos]
+    etiquetas = datos.get("etiquetas") or []
+    if isinstance(etiquetas, str):
+        etiquetas = [t.strip() for t in etiquetas.split(",")]
+    prompts = datos.get("prompts_imagenes") or []
+    from .imagenes import construir_prompt_imagen
+    normalizados = []
+    for indice, (seccion, bloque) in enumerate(zip(secciones, bloques)):
+        entrada = prompts[indice] if indice < len(prompts) else {}
+        if isinstance(entrada, str):
+            prompt = entrada
+            nombre = seccion
+        elif isinstance(entrada, dict):
+            prompt = str(entrada.get("prompt") or "")
+            nombre = str(entrada.get("seccion") or seccion)
+        else:
+            prompt, nombre = "", seccion
+        if not prompt.strip():
+            prompt = construir_prompt_imagen(bloque, tema=idea, estilo="cinematografico")
+        normalizados.append({"seccion": nombre, "prompt": prompt.strip()})
+
+    limpios_titulos = [str(t).strip() for t in titulos if str(t).strip()]
+    limpios_etiquetas = [str(t).strip().lstrip("#") for t in etiquetas if str(t).strip()]
+    descripcion = str(datos.get("descripcion") or "").strip()
+    if descripcion and not re.search(r"fuente|referencia", descripcion, re.IGNORECASE):
+        descripcion += "\n\nFuentes bibliográficas y afirmaciones pendientes de verificar antes de publicar."
+    paquete = {
+        "titulos": limpios_titulos[:5],
+        "descripcion": descripcion,
+        "etiquetas": limpios_etiquetas[:30],
+        "prompt_miniatura": str(datos.get("prompt_miniatura") or "").strip(),
+        "prompts_imagenes": normalizados,
+        "miniatura_ruta": "",
+    }
+    if paquete["titulos"]:
+        paquete["titulo"] = paquete["titulos"][0]
+    if al_log:
+        al_log(
+            f"[YouTube] Paquete listo: {len(paquete['titulos'])} títulos, "
+            f"{len(paquete['etiquetas'])} etiquetas y "
+            f"{len(normalizados)} prompts de escena."
+        )
+    return paquete
 
 
 # --------------------------------------------------------------- Utilidades

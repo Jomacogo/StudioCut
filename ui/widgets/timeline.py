@@ -36,6 +36,9 @@ class LineaDeTiempoWidget(QWidget):
         self._tiempo_actual = 0.0
         self._marcas: list[dict] = []  # [{"titulo": str, "tiempo": float, "imagen": str}]
         self._nombre_audio = "Audio Principal"
+        self._onda: list[float] = []  # amplitudes reales del audio (0..1)
+        self._onda_duracion = 0.0
+        self._onda_pendiente = False
         self._zoom = 1.0  # factor de zoom horizontal (1.0 = normal)
         self._arrastrando_playhead = False
         self._arrastrando_marca: int | None = None
@@ -63,6 +66,17 @@ class LineaDeTiempoWidget(QWidget):
 
     def set_tiempo_actual(self, t: float) -> None:
         self._tiempo_actual = max(0.0, min(float(t), self._duracion_total))
+        self.update()
+
+    def set_onda(self, valores: list[float], duracion: float = 0.0) -> None:
+        """Recibe la forma de onda real del audio para dibujarla en A1."""
+        self._onda = list(valores or [])
+        self._onda_duracion = float(duracion or 0.0)
+        self._onda_pendiente = False
+        self.update()
+
+    def set_onda_pendiente(self, pendiente: bool) -> None:
+        self._onda_pendiente = bool(pendiente)
         self.update()
 
     def set_datos(self, marcas: list[dict], duracion: float | None = None, nombre_audio: str = "") -> None:
@@ -347,18 +361,32 @@ class LineaDeTiempoWidget(QWidget):
         p.setPen(QPen(QColor("#10b981"), 1))
         p.drawPath(path_a)
 
-        # Dibujar onda sintética decorativa estilo Premiere/Resolve
+        # Forma de onda real (si ya se analizó el audio)
         p.setPen(QPen(QColor("#34d399"), 1))
         centro_y = y0 + (h / 2.0)
-        paso_px = 3
         inicio_px = int(x1 + 5)
-        fin_px = int(x2 - 5)
+        fin_px = int(min(x2 - 5, self.width()))
+        alto_max = h * 0.42
 
-        for px in range(inicio_px, min(fin_px, self.width()), paso_px):
-            # onda sintética suave
-            val = math.sin((px - inicio_px) * 0.15) * 0.5 + math.sin((px - inicio_px) * 0.05) * 0.4
-            altura_onda = max(2.0, abs(val) * (h * 0.35))
-            p.drawLine(px, int(centro_y - altura_onda), px, int(centro_y + altura_onda))
+        if self._onda and fin_px > inicio_px:
+            total_px = max(1, fin_px - inicio_px)
+            total_onda = len(self._onda)
+            duracion_onda = self._onda_duracion or self._duracion_total
+            for px in range(inicio_px, fin_px, 2):
+                t = (px - inicio_px) / total_px * duracion_onda
+                idx = int(t / max(0.001, duracion_onda) * total_onda)
+                idx = min(total_onda - 1, max(0, idx))
+                altura = max(1.5, self._onda[idx] * alto_max)
+                p.drawLine(px, int(centro_y - altura), px, int(centro_y + altura))
+        elif fin_px > inicio_px:
+            # Sin análisis todavía: línea base discreta en lugar de una onda falsa
+            p.setPen(QPen(QColor("#10b981"), 1))
+            p.drawLine(inicio_px, int(centro_y), fin_px, int(centro_y))
+            if self._onda_pendiente:
+                p.setPen(QColor("#4b5568"))
+                p.setFont(QFont("Segoe UI", 7, italic=True))
+                p.drawText(QRectF(x1 + 8, centro_y + 3, max(20.0, w - 16), 12),
+                           Qt.AlignmentFlag.AlignLeft, "analizando forma de onda…")
 
         # Nombre del audio
         p.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))

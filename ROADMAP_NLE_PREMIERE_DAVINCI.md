@@ -51,6 +51,18 @@
 - [x] **Snap magnético** a clips vecinos y playhead
 - [x] **Zoom horizontal** del timeline
 - [x] Atajos de teclado profesionales (V, C, S, Ctrl+K, Space, Ctrl+S)
+- [x] **Undo / Rehacer** (Ctrl+Z / Ctrl+Y, botones ↶ ↷, 40 instantáneas)
+- [x] **Forma de onda real** en A1 con caché en disco (FFmpeg + hilo aparte)
+- [x] Duraciones de audio y miniaturas cacheadas (apertura de proyecto inmediata)
+- [x] Generación de imágenes de la IA en paralelo (3 a la vez, orden preservado)
+- [x] **IA local de imágenes** (ComfyUI / Forge por HTTP) con detección de GPU,
+      VRAM y RAM, y bloqueo si no cumple los requisitos
+- [x] **Workflow propio de ComfyUI** (Flux GGUF, LoRAs) con inyección de
+      prompt, tamaño, semilla y pasos
+- [x] **Plantilla de miniatura** con marcadores `{titulo}`/`{tema}` y visor
+      opcional de los prompts de cada imagen
+- [x] **Barra de menús** (Archivo, Editar, Ajustes, Ventanas, Ayuda) que
+      sustituye los botones fijos de IA y YouTube en la cabecera
 
 ---
 
@@ -70,17 +82,19 @@
 - Detectar superposición y ofrecer: overwrite, insert, o swap
 - Snap al inicio/fin de clips adyacentes
 
-#### 3. Audio Waveform en pista A1
+#### 3. Audio Waveform en pista A1 ✅ (base implementada)
 > **Referencia:** Premiere, DaVinci Fairlight
-- Al importar audio, pre-calcular waveform (muestras de amplitud cada N frames)
-- Dibujar polígono de amplitud en la pista A1 del timeline
-- Cache en disco (`.wfcache`) para no recalcular
+- [x] Al importar audio, pre-calcular waveform (amplitud cada 20 ms)
+- [x] Dibujar la onda real en la pista A1 del timeline
+- [x] Cache en disco (`ui/.config/wavecache/`) para no recalcular
+- [ ] Mezcla por pista cuando existan A1/A2 independientes
 
-#### 4. Undo/Redo completo
+#### 4. Undo/Redo completo ✅ (base implementada)
 > **Referencia:** Ctrl+Z / Ctrl+Shift+Z en toda aplicación profesional
-- Implementar pila de acciones (`QUndoStack`) con `QUndoCommand` para cada operación
-- Operaciones: añadir/quitar marca, mover marca, cortar clip, asignar imagen, cambiar título
-- Mostrar historial de acciones en panel lateral
+- [x] Pila de instantáneas del proyecto (40 pasos) con Ctrl+Z / Ctrl+Y y botones
+- [x] Cubre marcas, clips, imágenes asignadas, subtítulos, efectos y metadatos
+- [ ] Migrar a `QUndoStack` con comandos nombrados
+- [ ] Mostrar historial de acciones en panel lateral
 
 #### 5. Multi-track (V1, V2, A1, A2)
 > **Referencia:** Premiere V1-V3, DaVinci V1-V16

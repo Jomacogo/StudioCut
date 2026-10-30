@@ -132,6 +132,19 @@ def _escribir(datos: dict) -> None:
 
 
 # -------------------------------------------------------------------- API
+def proteger_secreto(valor: str) -> bytes:
+    """Cifra un valor sensible con DPAPI en Windows (base64 fuera de Windows)."""
+    return _cifrar(str(valor).encode("utf-8"))
+
+
+def desproteger_secreto(datos: bytes) -> str:
+    """Descifra un valor producido por :func:`proteger_secreto`."""
+    try:
+        return _descifrar(datos).decode("utf-8")
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ErrorCredenciales("No se pudo descifrar el valor protegido.") from exc
+
+
 def guardar_clave(proveedor: str, clave: str) -> None:
     """Guarda (cifrada) la clave de un proveedor. Cadena vacía la borra."""
     proveedor = (proveedor or "").strip().lower()

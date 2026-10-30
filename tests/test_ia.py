@@ -191,6 +191,7 @@ def test_pipeline_sin_red() -> None:
     eventos: list[str] = []
     with tempfile.TemporaryDirectory(prefix="pipeline_") as tmp, \
             mock.patch("core.ia.pipeline.generar_guion", return_value=guion), \
+            mock.patch("core.ia.pipeline.generar_paquete_editorial", return_value={}), \
             mock.patch("core.ia.pipeline.generar_imagenes", return_value=["a.png", "b.png"]), \
             mock.patch("core.ia.pipeline.generar_voz_ia", return_value=str(Path(tmp) / "voz.wav")):
         cfg = ConfigIA(duracion_min=2, n_capitulos=2)
@@ -210,6 +211,69 @@ def test_pipeline_sin_red() -> None:
     assert resultado.voz.endswith("voz.wav")
     assert "guion" in eventos and "imagenes:2" in eventos and "voz" in eventos
     assert any(e.startswith("100:") for e in eventos), eventos
+
+
+def test_paquete_editorial_sin_red_y_prompt_de_miniatura() -> None:
+    from core.ia.guion import generar_paquete_editorial
+
+    guion = parsear_guion(GUION_EJEMPLO)
+    respuesta = {
+        "texto": json.dumps({
+            "titulos": ["Ahorra con intención"],
+            "descripcion": "Ideas prácticas para ordenar tus finanzas.",
+            "etiquetas": ["finanzas", "ahorro"],
+            "prompts_imagenes": [
+                {"seccion": "Introducción", "prompt": "Una mesa con un cuaderno de ahorro"},
+                {"seccion": "Capítulo uno", "prompt": "Una persona revisa sus gastos"},
+                {"seccion": "Capítulo dos", "prompt": "Una familia prepara un presupuesto"},
+                {"seccion": "Cierre", "prompt": "Una persona mira hacia el amanecer"},
+            ],
+        }, ensure_ascii=False)
+    }
+    with mock.patch("core.ia.proveedores.generar_texto", return_value=respuesta):
+        paquete = generar_paquete_editorial(
+            "Ahorro", guion, clave="test", instrucciones_canal="brief de prueba"
+        )
+    assert paquete["titulos"] == ["Ahorra con intención"]
+    assert paquete["etiquetas"] == ["finanzas", "ahorro"]
+    assert len(paquete["prompts_imagenes"]) == len(guion.bloques)
+    assert "pending" not in paquete["descripcion"].lower()
+    assert "\n\n" in paquete["descripcion"]
+    assert "16:9" in paquete["prompt_miniatura"]
+    assert "dark academia" in paquete["prompt_miniatura"]
+
+
+def test_config_ia_persiste_brief_y_paquete() -> None:
+    paquete = {"titulos": ["Título de prueba"], "prompt_miniatura": "Estilo clásico"}
+    cfg = ConfigIA(prompt_canal="Mi brief editable", paquete_editorial=paquete)
+    restaurada = ConfigIA.desde_dict(cfg.a_dict())
+    assert restaurada.prompt_canal == "Mi brief editable"
+    assert restaurada.paquete_editorial == paquete
+    assert restaurada.duracion_min == 30
+
+
+def test_pipeline_prepara_paquete_con_guion_existente() -> None:
+    guion = parsear_guion(GUION_EJEMPLO)
+    paquete = {
+        "titulos": ["Título"], "descripcion": "Descripción", "etiquetas": ["ahorro"],
+        "prompt_miniatura": "Prompt 16:9", "prompts_imagenes": [], "miniatura_ruta": "",
+    }
+    eventos = []
+    cfg = ConfigIA(generar_imagenes=False, generar_voz=False)
+    with mock.patch("core.ia.pipeline.generar_guion") as generar_guion_mock, \
+            mock.patch("core.ia.pipeline.generar_paquete_editorial", return_value=paquete), \
+            mock.patch("core.ia.pipeline.generar_imagenes") as imagenes_mock, \
+            mock.patch("core.ia.pipeline.generar_voz_ia") as voz_mock:
+        resultado = ejecutar_pipeline(
+            "Ahorro", cfg, {"openrouter": "clave-falsa"}, tempfile.gettempdir(),
+            guion_previo=guion, al_paquete=lambda p: eventos.append(p),
+        )
+    generar_guion_mock.assert_not_called()
+    voz_mock.assert_not_called()
+    imagenes_mock.assert_not_called()
+    assert resultado.guion is guion
+    assert resultado.paquete == paquete
+    assert eventos == [paquete]
 
 
 def test_pipeline_exige_clave() -> None:
@@ -373,7 +437,7 @@ def test_mcp_estado_sin_claves_reales() -> None:
 
 
 # ------------------------------------------------------------------- GUI
-def test_gui_pestana_ia() -> None:
+def test_gui_ventanas_ia_youtube_separadas() -> None:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     try:
         from PyQt6.QtWidgets import QApplication
@@ -390,8 +454,24 @@ def test_gui_pestana_ia() -> None:
             ventana.tabs_inspector.tabText(i)
             for i in range(ventana.tabs_inspector.count())
         ]
-        assert "🤖 IA" in pestañas, pestañas
+        assert all("IA" not in pestaña and "YouTube" not in pestaña for pestaña in pestañas), pestañas
         assert ventana.panel_ia is not None
+        # IA y YouTube ya no ocupan la cabecera: se abren desde los menús.
+        menu_ventanas = next(
+            a.menu() for a in ventana.menuBar().actions()
+            if a.text().replace("&", "") == "Ventanas"
+        )
+        etiquetas = [a.text() for a in menu_ventanas.actions()]
+        assert any("IA" in e for e in etiquetas), etiquetas
+        assert any("YouTube" in e for e in etiquetas), etiquetas
+        assert not hasattr(ventana, "btn_abrir_ia")
+        ventana._abrir_ventana_ia()
+        ventana._abrir_ventana_youtube()
+        app.processEvents()
+        assert ventana._ventana_ia is not None and ventana._ventana_ia.isVisible()
+        assert ventana._ventana_youtube is not None and ventana._ventana_youtube.isVisible()
+        assert ventana.panel_ia.parentWidget() is ventana._ventana_ia
+        assert ventana._youtube_panel.parentWidget() is not ventana.tabs_inspector
         cfg = ventana.panel_ia.config_actual()
         assert cfg.modelo_texto == "nvidia/nemotron-3-ultra-550b-a55b:free"
         assert cfg.proveedor_imagen == "pollinations"
@@ -420,6 +500,73 @@ def test_gui_pestana_ia() -> None:
             assert ventana.img_manual[0].endswith("intro_20260101_000000.jpg"), ventana.img_manual
             assert ventana.img_manual[1].endswith("capitulo_01_20260101_000000.jpg"), ventana.img_manual
             assert ventana.img_manual[2].endswith("cierre_20260101_000000.jpg"), ventana.img_manual
+    finally:
+        if ventana._ventana_ia is not None:
+            ventana._ventana_ia.close()
+        if ventana._ventana_youtube is not None:
+            ventana._ventana_youtube.close()
+        ventana._proyecto_modificado = False
+        ventana.close()
+        app.processEvents()
+
+
+# --------------------------------------------------------------- YouTube
+def test_youtube_fecha_programada() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from core.youtube_uploader import ErrorYouTube, _fecha_publicacion
+
+    futura = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat(timespec="seconds")
+    normalizada = _fecha_publicacion(futura)
+    assert normalizada.startswith(futura[:13]), normalizada
+    assert _fecha_publicacion("") == ""
+
+    pasada = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(timespec="seconds")
+    try:
+        _fecha_publicacion(pasada)
+    except ErrorYouTube as exc:
+        assert "5 minutos" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("Una fecha pasada debía rechazarse")
+
+
+def test_gui_youtube_idioma_y_programacion() -> None:
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    try:
+        from PyQt6.QtWidgets import QApplication
+    except Exception as exc:  # pragma: no cover - entorno sin Qt
+        print(f"AVISO GUI omitida: {exc}")
+        return
+    app = QApplication.instance() or QApplication([])
+
+    from ui.main_window import VentanaPrincipal
+
+    ventana = VentanaPrincipal("VideoCapitulosTest", "TestIA")
+    try:
+        assert ventana.cbo_idioma_yt.count() > 1
+        assert ventana.cbo_idioma_yt.findData("es") >= 0
+
+        # Programar obliga a privado y bloquea el selector mientras esté activo.
+        idx_publico = ventana.cbo_privacidad_youtube.findData("public")
+        ventana.cbo_privacidad_youtube.setCurrentIndex(idx_publico)
+        ventana.chk_programar.setChecked(True)
+        app.processEvents()
+        assert ventana.cbo_privacidad_youtube.currentData() == "private"
+        assert ventana.cbo_privacidad_youtube.isEnabled() is False
+        assert ventana.dt_publicar.isEnabled() is True
+        assert ventana._publicar_en_iso(), "Debe devolver una fecha ISO"
+        assert ventana._validar_programacion_ui() is True
+
+        ventana.chk_programar.setChecked(False)
+        app.processEvents()
+        assert ventana.cbo_privacidad_youtube.isEnabled() is True
+        assert ventana._publicar_en_iso() == ""
+
+        # Los metadatos nuevos viajan al proyecto.
+        ventana.cbo_idioma_yt.setCurrentIndex(ventana.cbo_idioma_yt.findData("es"))
+        datos = ventana._recopilar_datos_proyecto()
+        assert datos["youtube"]["idioma"] == "es"
+        assert "programar_fecha" in datos["youtube"]
     finally:
         ventana._proyecto_modificado = False
         ventana.close()

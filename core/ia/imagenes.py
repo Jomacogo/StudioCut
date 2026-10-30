@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import re
+import threading
 import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from .guion import Bloque, Guion, resumen_para_imagen
@@ -114,11 +116,20 @@ def generar_imagenes(
     ancho: int = 1920,
     alto: int = 1080,
     estilo: str = _ESTILO_DEFECTO,
+    cuenta_flow: str = "",
+    local: dict | None = None,
+    prompts_personalizados: list[dict] | None = None,
     al_progreso=None,
     al_log=None,
     cancelar=None,
+    max_paralelo: int | None = None,
 ) -> list[str]:
-    """Genera una imagen por bloque y devuelve las rutas en orden."""
+    """Genera una imagen por bloque y devuelve las rutas en orden.
+
+    Las imágenes se generan en paralelo: cada una tarda varios segundos y de
+    forma secuencial un guion de 10 capítulos podía superar los 5 minutos.
+    El orden de las rutas devueltas sigue siendo el de los bloques.
+    """
     carpeta = Path(carpeta)
     carpeta.mkdir(parents=True, exist_ok=True)
     bloques = [b for b in guion.bloques if b.texto.strip()]
@@ -126,20 +137,47 @@ def generar_imagenes(
         raise ErrorIA("El guion no tiene secciones para ilustrar.")
 
     sello = time.strftime("%Y%m%d_%H%M%S")
-    rutas: list[str] = []
-    errores: list[str] = []
+    trabajadores = _paralelo(proveedor, max_paralelo)
+    candado = threading.Lock()
 
+    def _log(mensaje: str) -> None:
+        if al_log is not None:
+            with candado:
+                al_log(mensaje)
+
+    def _avance(valor: int, etiqueta: str) -> None:
+        if al_progreso is not None:
+            with candado:
+                al_progreso(valor, etiqueta)
+
+    # Prompts ya resueltos y aviso de inicio (en orden de capítulo)
+    prompts: list[str] = []
     for i, bloque in enumerate(bloques):
-        if cancelar is not None and cancelar.is_set():
-            raise ErrorIA("Generación de imágenes cancelada.")
-        if al_progreso:
-            al_progreso(int(i * 100 / len(bloques)), bloque.encabezado)
-        prompt = construir_prompt_imagen(
-            bloque, tema=guion.idea, estilo=estilo, ancho=ancho, alto=alto
+        prompt = ""
+        if prompts_personalizados and i < len(prompts_personalizados):
+            entrada = prompts_personalizados[i]
+            if isinstance(entrada, dict):
+                prompt = str(entrada.get("prompt") or "").strip()
+            elif isinstance(entrada, str):
+                prompt = entrada.strip()
+        if not prompt:
+            prompt = construir_prompt_imagen(
+                bloque, tema=guion.idea, estilo=estilo, ancho=ancho, alto=alto
+            )
+        prompts.append(prompt)
+        _log(f"[Imágenes] {bloque.encabezado} → {proveedor}")
+
+    if trabajadores > 1:
+        _log(
+            f"[Imágenes] Generando {len(bloques)} imágenes en paralelo "
+            f"({trabajadores} a la vez)…"
         )
-        if al_log:
-            al_log(f"[Imágenes] {bloque.encabezado} → {proveedor}")
-        datos = None
+
+    def _generar_una(indice: int, prompt: str) -> tuple[int, str, str]:
+        if cancelar is not None and cancelar.is_set():
+            return indice, "", "cancelado"
+        bloque = bloques[indice]
+        datos: bytes | None = None
         ultimo_error = ""
         for intento in range(3):
             try:
@@ -150,7 +188,13 @@ def generar_imagenes(
                     modelo=modelo,
                     ancho=ancho,
                     alto=alto,
-                    semilla=1000 + i,
+                    semilla=1000 + indice,
+                    cuenta_flow=cuenta_flow,
+                    local_backend=str((local or {}).get("backend") or ""),
+                    local_url=str((local or {}).get("url") or ""),
+                    local_pasos=int((local or {}).get("pasos") or 0),
+                    local_workflow=str((local or {}).get("workflow") or ""),
+                    negativo=str((local or {}).get("negativo") or ""),
                 )
                 if len(datos) < 1024:
                     raise ErrorIA("la imagen llegó vacía")
@@ -160,36 +204,92 @@ def generar_imagenes(
                 espera = _espera_limite(ultimo_error)
                 if (proveedor == "pollinations" and espera is not None
                         and intento < 2):
-                    if al_log:
-                        al_log(
-                            f"[Imágenes] Límite gratuito de Pollinations: "
-                            f"esperando {espera} s antes de reintentar…"
-                        )
+                    _log(
+                        f"[Imágenes] Límite gratuito de Pollinations: "
+                        f"esperando {espera} s antes de reintentar…"
+                    )
                     if _dormir(espera, cancelar):
-                        raise ErrorIA("Generación de imágenes cancelada.")
+                        return indice, "", "cancelado"
                     continue
                 break
 
         if datos is None:
-            errores.append(f"{bloque.encabezado}: {ultimo_error}")
-            if al_log:
-                al_log(f"[Imágenes] Falló {bloque.encabezado}: {ultimo_error}")
-            continue
-
+            return indice, "", ultimo_error
         ruta = carpeta / (_nombre_archivo(bloque, sello) + _extension(datos))
         ruta.write_bytes(datos)
-        rutas.append(str(ruta))
-        if al_log:
-            al_log(f"[Imágenes] Guardada {ruta.name} ({len(datos) // 1024} KB)")
+        _log(f"[Imágenes] Guardada {ruta.name} ({len(datos) // 1024} KB)")
+        return indice, str(ruta), ""
 
+    resultados: dict[int, str] = {}
+    errores: list[str] = []
+    cancelada = False
+    completadas = 0
+    total = len(bloques)
+    pool = ThreadPoolExecutor(max_workers=trabajadores, thread_name_prefix="img-ia")
+    try:
+        futuros = {
+            pool.submit(_generar_una, i, prompts[i]): i for i in range(total)
+        }
+        for futuro in as_completed(futuros):
+            if cancelar is not None and cancelar.is_set():
+                cancelada = True
+                for pendiente in futuros:
+                    pendiente.cancel()
+                break
+            indice = futuros[futuro]
+            try:
+                _, ruta, error = futuro.result()
+            except Exception as exc:  # noqa: BLE001 - un fallo no debe tumbar el resto
+                ruta, error = "", str(exc)
+            completadas += 1
+            if ruta:
+                resultados[indice] = ruta
+            elif error == "cancelado":
+                cancelada = True
+                for pendiente in futuros:
+                    pendiente.cancel()
+                break
+            else:
+                errores.append(f"{bloques[indice].encabezado}: {error}")
+                _log(f"[Imágenes] Falló {bloques[indice].encabezado}: {error}")
+            _avance(
+                int(completadas * 100 / total),
+                f"{completadas}/{total} listas",
+            )
+    finally:
+        pool.shutdown(wait=not cancelada, cancel_futures=True)
+
+    if cancelada:
+        raise ErrorIA("Generación de imágenes cancelada.")
+
+    rutas = [resultados[i] for i in sorted(resultados)]
     if not rutas:
         detalle = "\n".join(errores[-4:]) if errores else "sin detalle"
         raise ErrorIA("No se pudo generar ninguna imagen.\n" + detalle)
-    if errores and al_log:
-        al_log(f"[Imágenes] {len(errores)} imagen(es) fallaron; se usarán las demás.")
-    if al_progreso:
-        al_progreso(100, "imágenes listas")
+    if errores:
+        _log(f"[Imágenes] {len(errores)} imagen(es) fallaron; se usarán las demás.")
+    _avance(100, "imágenes listas")
     return rutas
+
+
+def _paralelo(proveedor: str, solicitado: int | None) -> int:
+    """Número de imágenes simultáneas según el proveedor.
+
+    Pollinations (gratis) corta si se le piden demasiadas a la vez, así que
+    se queda en 2; los proveedores de pago suelen admitir 3-4 sin problemas.
+    La IA local va siempre de una en una: comparte una sola GPU y lanzar dos
+    trabajos a la vez solo consigue quedarse sin VRAM.
+    """
+    prov = (proveedor or "").strip().lower()
+    if prov in {"local", "ia_local", "comfyui", "forge", "a1111"}:
+        return 1
+    if solicitado is not None:
+        return max(1, min(8, int(solicitado)))
+    if prov == "pollinations":
+        return 2
+    if prov in {"useapi", "google_flow", "google-flow"}:
+        return 3
+    return 3
 
 
 def _espera_limite(mensaje: str) -> float | None:

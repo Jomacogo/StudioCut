@@ -12,6 +12,30 @@ from core.renderer import (
     ConfigRender, construir_comando, construir_comando_un_audio, ejecutar_ffmpeg,
 )
 from core.media import duracion_audio, ErrorMedia
+from core.waveform import onda_combinada
+
+
+class TrabajadorOnda(QThread):
+    """Analiza la forma de onda de los audios sin bloquear la interfaz."""
+
+    listo = pyqtSignal(list, tuple)
+    fallo = pyqtSignal(str)
+
+    def __init__(self, audios: list[str], parent=None):
+        super().__init__(parent)
+        self._audios = list(audios)
+        self._clave = tuple(audios)
+
+    def clave(self) -> tuple:
+        return self._clave
+
+    def run(self) -> None:  # pragma: no cover - hilo
+        try:
+            duraciones = [duracion_audio(a) for a in self._audios]
+            valores = onda_combinada(self._audios, duraciones, 900)
+            self.listo.emit(valores, self._clave)
+        except Exception as exc:  # noqa: BLE001
+            self.fallo.emit(str(exc))
 
 
 class Trabajador(QThread):
@@ -143,6 +167,9 @@ class Trabajador(QThread):
             miniatura=self._yt.get("miniatura"),
             al_progreso=self.progreso.emit,
             al_log=self.log.emit,
+            privacidad=self._yt.get("privacidad", "unlisted"),
+            idioma=self._yt.get("idioma", ""),
+            publicar_en=self._yt.get("publicar_en", ""),
         )
         url_final = f"https://youtu.be/{vid}"
         return url_final
@@ -189,16 +216,21 @@ class TrabajadorIA(QThread):
     log = pyqtSignal(str)
     guion = pyqtSignal(str, object)   # texto, Guion
     imagenes = pyqtSignal(list)       # rutas generadas
+    paquete = pyqtSignal(object)      # metadatos y prompts visuales
     voz = pyqtSignal(str)             # ruta del audio
     listo = pyqtSignal(object)        # ResultadoIA
     fallo = pyqtSignal(str)
 
-    def __init__(self, idea: str, cfg, claves: dict, carpeta: str, parent=None):
+    def __init__(
+        self, idea: str, cfg, claves: dict, carpeta: str, parent=None,
+        guion_previo=None,
+    ):
         super().__init__(parent)
         self._idea = idea
         self._cfg = cfg
         self._claves = dict(claves or {})
         self._carpeta = carpeta
+        self._guion_previo = guion_previo
         self._cancelar_ev = threading.Event()
 
     def cancelar(self) -> None:
@@ -219,6 +251,8 @@ class TrabajadorIA(QThread):
                 al_guion=lambda texto, guion: self.guion.emit(texto, guion),
                 al_imagenes=lambda rutas: self.imagenes.emit(list(rutas)),
                 al_voz=lambda ruta: self.voz.emit(ruta),
+                al_paquete=lambda datos: self.paquete.emit(dict(datos)),
+                guion_previo=self._guion_previo,
             )
             self.listo.emit(resultado)
         except Exception as exc:  # noqa: BLE001

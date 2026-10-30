@@ -225,7 +225,8 @@ def generar_texto(
     """
     if not clave and not _es_local(base_url):
         raise ErrorIA(
-            "Falta la clave de API. Pégala en la pestaña «🤖 IA» y pulsa Guardar."
+            "Falta la clave de API. Pégala en el asistente de IA "
+            "(menú Ventanas → Asistente de IA) y pulsa Guardar."
         )
     lista: list[str] = []
     respaldos = modelos_respaldo
@@ -339,9 +340,76 @@ def generar_imagen_bytes(
     base_url: str = BASE_OPENAI,
     timeout: float = 240.0,
     semilla: int | None = None,
+    cuenta_flow: str = "",
+    local_backend: str = "",
+    local_url: str = "",
+    local_pasos: int = 0,
+    local_workflow: str = "",
+    negativo: str = "",
 ) -> bytes:
     """Genera una imagen y devuelve sus bytes (PNG/JPEG/WebP)."""
     proveedor = (proveedor or "openrouter").strip().lower()
+    if proveedor in {"local", "ia_local", "comfyui", "forge", "a1111"}:
+        # Import perezoso: ``local`` usa las utilidades HTTP de este módulo.
+        from .local import generar_local
+
+        backend = local_backend or (
+            "forge" if proveedor in {"forge", "a1111"} else "comfyui"
+        )
+        return generar_local(
+            prompt,
+            backend=backend,
+            url=local_url,
+            modelo=modelo,
+            ancho=ancho,
+            alto=alto,
+            pasos=local_pasos or 25,
+            semilla=int(semilla or 0),
+            negativo=negativo,
+            workflow_ruta=local_workflow,
+            timeout=max(120.0, timeout),
+        )
+    if proveedor in {"useapi", "google_flow", "google-flow"}:
+        if not clave:
+            raise ErrorIA("Google Flow requiere guardar el token de UseAPI.")
+        cuerpo = {
+            "prompt": prompt,
+            "model": modelo or "nano-banana-2-lite",
+            "aspectRatio": "16:9" if ancho >= alto else "9:16",
+            "count": 1,
+        }
+        if cuenta_flow.strip():
+            cuerpo["email"] = cuenta_flow.strip()
+        if semilla is not None:
+            cuerpo["seed"] = int(semilla)
+        datos = peticion_json(
+            "https://api.useapi.net/v1/google-flow/images",
+            metodo="POST",
+            payload=cuerpo,
+            clave=clave,
+            timeout=timeout,
+            cabeceras={"User-Agent": "StudioCut/1.0 (UseAPI Google Flow image client)"},
+        )
+        media = datos.get("media") or []
+        imagen = (((media[0] or {}).get("image") or {}).get("generatedImage") or {}) if media else {}
+        if imagen.get("encodedImage"):
+            try:
+                return base64.b64decode(imagen["encodedImage"], validate=True)
+            except (ValueError, TypeError) as exc:
+                raise ErrorIA("UseAPI devolvió una imagen codificada inválida.") from exc
+        if imagen.get("fifeUrl"):
+            url_imagen = str(imagen["fifeUrl"])
+            partes_url = urllib.parse.urlsplit(url_imagen)
+            host_imagen = (partes_url.hostname or "").lower()
+            if partes_url.scheme != "https" or not (
+                host_imagen == "google"
+                or host_imagen.endswith(".google")
+                or host_imagen == "googleusercontent.com"
+                or host_imagen.endswith(".googleusercontent.com")
+            ):
+                raise ErrorIA("Google Flow devolvió una URL de imagen inesperada.")
+            return _descargar(url_imagen, timeout=timeout)
+        raise ErrorIA("Google Flow no devolvió ninguna imagen descargable.")
     if proveedor in ("ninguno", "none", ""):
         raise ErrorIA("La generación de imágenes está desactivada.")
     if proveedor == "pollinations":

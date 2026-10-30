@@ -14,13 +14,16 @@ import tempfile
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QMimeData, QPoint, QSettings, QSize, Qt, QUrl
+from PyQt6.QtCore import (
+    QDateTime, QMimeData, QPoint, QSettings, QSize, Qt, QTimer, QUrl,
+)
 from PyQt6.QtGui import (
     QAction, QColor, QDesktopServices, QDrag, QFont, QIcon, QKeySequence, QPixmap,
     QShortcut,
 )
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox,
+    QAbstractItemView, QCheckBox, QColorDialog, QComboBox, QDateTimeEdit, QDialog,
+    QDoubleSpinBox,
     QFileDialog, QFontComboBox, QFormLayout, QFrame, QGroupBox, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu,
     QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
@@ -42,7 +45,8 @@ from core.subtitles import (
     EstiloSubtitulos, cues_desde_capitulos, cues_desde_palabras, escribir_srt,
     leer_subtitulos,
 )
-from ui.trabajador import DetectorCapitulos, Trabajador, TrabajadorVoz
+from ui.trabajador import DetectorCapitulos, Trabajador, TrabajadorOnda, TrabajadorVoz
+from ui.widgets.miniaturas import icono_lista
 from ui.widgets.monitor import MonitorWidget
 from ui.widgets.panel_ia import PanelIA
 from ui.widgets.timeline import LineaDeTiempoWidget
@@ -190,20 +194,48 @@ class VentanaPrincipal(QMainWindow):
         self._color_borde_sub = "#000000"
         self._color_caja_sub = "#000000"
 
-        # Inteligencia artificial
+        # Inteligencia artificial y ventanas auxiliares conectadas al proyecto
         self._ia_config = ConfigIA()
         self._ia_marcas_pendientes: list[dict] = []
+        self._ia_paquete_editorial: dict = {}
+        self._ventana_ia: QDialog | None = None
+        self._ventana_youtube: QDialog | None = None
+        self._youtube_video_ids: dict[str, str] = {}
 
         # Gestión de proyecto propio (.stcut)
         self._ruta_proyecto: Path | None = None
         self._proyecto_modificado: bool = False
 
+        # Deshacer / Rehacer: instantáneas ligeras del estado del proyecto
+        self._undo_stack: list[str] = []
+        self._redo_stack: list[str] = []
+        self._snapshot_undo = ""
+        self._huella_actual: tuple = ()
+        self._undo_activo = False
+
+        # Forma de onda del audio (se calcula en segundo plano)
+        self._onda_clave: tuple | None = None
+        self._onda_valores: list[float] = []
+        self._onda_trabajador: TrabajadorOnda | None = None
+        self._onda_dur = 0.0
+
         self._construir_ui()
         self._configurar_atajos()
         self._cargar_sesion()
 
+        self._undo_activo = True
+        self._snapshot_undo = self._estado_serializado()
+        self._huella_actual = self._huella_undo()
+        self._timer_undo = QTimer(self)
+        self._timer_undo.setInterval(1500)
+        self._timer_undo.timeout.connect(self._capturar_undo)
+        self._timer_undo.start()
+        self._actualizar_acciones_undo()
+
     # ------------------------------------------------------------------ UI
     def _construir_ui(self) -> None:
+        self._construir_menu()
+
         raiz = QWidget()
         raiz.setObjectName("CentralRoot")
         self.setCentralWidget(raiz)
@@ -357,13 +389,143 @@ class VentanaPrincipal(QMainWindow):
 
         return lay
 
-    def _configurar_atajos(self) -> None:
-        """Atajos de teclado de edición profesional."""
-        QShortcut(QKeySequence("Ctrl+N"), self, self._nuevo_proyecto)
-        QShortcut(QKeySequence("Ctrl+O"), self, self._abrir_proyecto)
-        QShortcut(QKeySequence("Ctrl+S"), self, self._guardar_proyecto)
-        QShortcut(QKeySequence("Ctrl+Shift+S"), self, self._guardar_proyecto_como)
+    # ------------------------------------------------------------- Menús
+    def _construir_menu(self) -> None:
+        """Barra de menús clásica: Archivo, Editar, Ajustes, Ventanas y Ayuda.
 
+        Las ventanas de IA y YouTube dejan de ocupar la cabecera: se abren
+        solo cuando se piden desde aquí, así no se amontonan botones.
+        """
+        barra = self.menuBar()
+        barra.setNativeMenuBar(False)
+        barra.setStyleSheet(
+            "QMenuBar { background: #11141d; color: #cbd5e1; padding: 2px 4px; "
+            "border-bottom: 1px solid #1f2432; } "
+            "QMenuBar::item { padding: 5px 11px; border-radius: 4px; } "
+            "QMenuBar::item:selected { background: #1e2436; color: #38bdf8; } "
+            "QMenu { background: #151926; color: #e2e8f0; border: 1px solid #282f44; "
+            "padding: 4px; } "
+            "QMenu::item { padding: 6px 26px 6px 22px; border-radius: 4px; } "
+            "QMenu::item:selected { background: #1e293b; color: #38bdf8; } "
+            "QMenu::separator { height: 1px; background: #232838; margin: 4px 8px; }"
+        )
+
+        # ---- Archivo ----
+        m_archivo = barra.addMenu("&Archivo")
+        self._accion(m_archivo, "Nuevo proyecto", self._nuevo_proyecto, "Ctrl+N")
+        self._accion(m_archivo, "Abrir proyecto…", self._abrir_proyecto, "Ctrl+O")
+        m_archivo.addSeparator()
+        self._accion(m_archivo, "Guardar", self._guardar_proyecto, "Ctrl+S")
+        self._accion(
+            m_archivo, "Guardar como…", self._guardar_proyecto_como, "Ctrl+Shift+S"
+        )
+        m_archivo.addSeparator()
+        self._accion(m_archivo, "Añadir audios…", self._anadir_audios)
+        self._accion(m_archivo, "Añadir imágenes…", self._anadir_imagenes)
+        m_archivo.addSeparator()
+        self._accion(m_archivo, "Exportar MP4…", self._generar, "Ctrl+E")
+        self._accion(m_archivo, "Abrir carpeta de salida", self._abrir_carpeta)
+        m_archivo.addSeparator()
+        self._accion(m_archivo, "Salir", self.close, "Ctrl+Q")
+
+        # ---- Editar ----
+        m_editar = barra.addMenu("&Editar")
+        self._accion(m_editar, "Deshacer", self._deshacer, "Ctrl+Z")
+        self._accion(m_editar, "Rehacer", self._rehacer, "Ctrl+Y")
+        m_editar.addSeparator()
+        self._accion(m_editar, "Detectar capítulos en el audio", self._detectar)
+
+        # ---- Ajustes ----
+        m_ajustes = barra.addMenu("A&justes")
+        self._accion(
+            m_ajustes, "Asistente de IA, claves y modelos…", self._abrir_ventana_ia
+        )
+        self._accion(
+            m_ajustes, "Publicación en YouTube…", self._abrir_ventana_youtube
+        )
+        m_ajustes.addSeparator()
+        self._accion(
+            m_ajustes, "Comprobar requisitos de IA local", self._comprobar_ia_local
+        )
+
+        # ---- Ventanas ----
+        m_ventanas = barra.addMenu("&Ventanas")
+        self._accion(m_ventanas, "Asistente de IA", self._abrir_ventana_ia, "Ctrl+I")
+        self._accion(
+            m_ventanas, "YouTube", self._abrir_ventana_youtube, "Ctrl+Shift+Y"
+        )
+        m_ventanas.addSeparator()
+        self._accion(
+            m_ventanas, "Cerrar ventanas flotantes", self._cerrar_ventanas_flotantes,
+            "Ctrl+Shift+W",
+        )
+
+        # ---- Ayuda ----
+        m_ayuda = barra.addMenu("A&yuda")
+        self._accion(m_ayuda, "Guía rápida (README)", self._abrir_readme, "F1")
+        self._accion(m_ayuda, "Instalar la IA local", self._mostrar_guia_ia_local)
+        m_ayuda.addSeparator()
+        self._accion(m_ayuda, "Acerca de Studio Cut", self._acerca_de)
+
+    def _accion(self, menu, texto: str, funcion, atajo: str = "") -> QAction:
+        """Crea una acción de menú conectada a un método de la ventana."""
+        accion = QAction(texto, self)
+        if atajo:
+            accion.setShortcut(QKeySequence(atajo))
+        accion.triggered.connect(funcion)
+        menu.addAction(accion)
+        return accion
+
+    def _cerrar_ventanas_flotantes(self) -> None:
+        for ventana in (self._ventana_ia, self._ventana_youtube):
+            if ventana is not None and ventana.isVisible():
+                ventana.hide()
+
+    def _abrir_readme(self) -> None:
+        ruta = Path(__file__).resolve().parents[1] / "README.md"
+        if not ruta.exists():
+            QMessageBox.information(
+                self, "Guía", "No se encontró el README del proyecto."
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(ruta)))
+
+    def _mostrar_guia_ia_local(self) -> None:
+        self._abrir_ventana_ia()
+        self.panel_ia._mostrar_guia_local()
+
+    def _comprobar_ia_local(self) -> None:
+        from core import hardware
+
+        hardware.olvidar_cache()
+        equipo = hardware.detectar_equipo(usar_cache=False)
+        estado = "✓ Cumple los requisitos" if equipo.cumple_requisitos else "✗ No cumple los requisitos"
+        QMessageBox.information(
+            self,
+            "IA local · requisitos",
+            f"{estado}\n\n"
+            + "\n".join(equipo.detalles)
+            + f"\n\n{equipo.motivo}\n{equipo.consejo}",
+        )
+
+    def _acerca_de(self) -> None:
+        QMessageBox.about(
+            self,
+            "Acerca de Studio Cut",
+            "<h3>Studio Cut</h3>"
+            "<p>Editor de video por capítulos para audiolibros y contenido "
+            "narrado: guion, imágenes, voz, subtítulos, miniatura y "
+            "publicación en YouTube.</p>"
+            "<p>Tu proyecto se guarda en un archivo <b>.stcut</b>. Las claves "
+            "de IA se guardan cifradas con la cuenta de Windows.</p>",
+        )
+
+    def _configurar_atajos(self) -> None:
+        """Atajos de teclado de edición profesional.
+
+        Ctrl+N/O/S/Shift+S/Z/Y ya vienen de las acciones de la barra de
+        menús; declararlos otra vez aquí provocaría atajos ambiguos.
+        """
         sh_space = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
         sh_space.activated.connect(self._toggle_espacio_reproduccion)
 
@@ -531,6 +693,7 @@ class VentanaPrincipal(QMainWindow):
         lay.addWidget(lbl_tit)
 
         self.tabs_inspector = QTabWidget()
+        self.tabs_inspector.setObjectName("InspectorEditorTabs")
 
         # Pestaña 1: Configuración de Video
         w_video = QWidget()
@@ -814,14 +977,47 @@ class VentanaPrincipal(QMainWindow):
         lay_yt = QVBoxLayout(w_yt_inner)
         lay_yt.setContentsMargins(4, 4, 4, 4)
 
-        self.grp_yt = QGroupBox("Publicar en YouTube al terminar")
-        self.grp_yt.setCheckable(True)
-        self.grp_yt.setChecked(False)
-        form_yt = QFormLayout(self.grp_yt)
+        # ── 1. Cuenta ──
+        self.grp_cuenta_yt = QGroupBox("Cuenta de YouTube")
+        form_cuenta = QFormLayout(self.grp_cuenta_yt)
+        form_cuenta.setSpacing(8)
+
+        self.lbl_secret = QLineEdit()
+        self.lbl_secret.setReadOnly(True)
+        self.lbl_secret.setText(str(self._ajustes.value("youtube_oauth_client") or ""))
+        self.lbl_secret.setPlaceholderText("OAuth Desktop client JSON…")
+        b_secret = QPushButton("Configurar…")
+        b_secret.clicked.connect(self._buscar_secret)
+        fila_s = QHBoxLayout()
+        fila_s.addWidget(self.lbl_secret, 1)
+        fila_s.addWidget(b_secret)
+        form_cuenta.addRow("Configuración OAuth:", fila_s)
+
+        fila_cuenta = QHBoxLayout()
+        self.btn_conectar_youtube = QPushButton("🔗 Conectar cuenta")
+        self.btn_conectar_youtube.clicked.connect(self._conectar_youtube)
+        fila_cuenta.addWidget(self.btn_conectar_youtube, 1)
+        self.btn_desconectar_youtube = QPushButton("Desconectar")
+        self.btn_desconectar_youtube.setToolTip(
+            "Borra la autorización guardada en este equipo y pide permiso de nuevo."
+        )
+        self.btn_desconectar_youtube.clicked.connect(self._desconectar_youtube)
+        fila_cuenta.addWidget(self.btn_desconectar_youtube)
+        form_cuenta.addRow(fila_cuenta)
+
+        self.lbl_estado_youtube = QLabel("YouTube no conectado")
+        self.lbl_estado_youtube.setWordWrap(True)
+        form_cuenta.addRow("Cuenta:", self.lbl_estado_youtube)
+        lay_yt.addWidget(self.grp_cuenta_yt)
+
+        # ── 2. Metadatos ──
+        self.grp_datos_yt = QGroupBox("Metadatos del video")
+        form_yt = QFormLayout(self.grp_datos_yt)
         form_yt.setSpacing(8)
 
         self.txt_titulo = QLineEdit()
         self.txt_titulo.setPlaceholderText("Título del video...")
+        self.txt_titulo.setMaxLength(100)
         form_yt.addRow("Título:", self.txt_titulo)
 
         self.txt_desc = QPlainTextEdit()
@@ -833,15 +1029,27 @@ class VentanaPrincipal(QMainWindow):
         self.txt_tags.setPlaceholderText("etiqueta1, etiqueta2...")
         form_yt.addRow("Etiquetas:", self.txt_tags)
 
-        self.lbl_secret = QLineEdit()
-        self.lbl_secret.setReadOnly(True)
-        self.lbl_secret.setPlaceholderText("client_secret.json...")
-        b_secret = QPushButton("Buscar…")
-        b_secret.clicked.connect(self._buscar_secret)
-        fila_s = QHBoxLayout()
-        fila_s.addWidget(self.lbl_secret, 1)
-        fila_s.addWidget(b_secret)
-        form_yt.addRow("OAuth Secret:", fila_s)
+        self.cbo_idioma_yt = QComboBox()
+        for etiqueta, codigo in (
+            ("Sin especificar", ""),
+            ("Español", "es"),
+            ("Español (Latinoamérica)", "es-419"),
+            ("Inglés", "en"),
+            ("Portugués", "pt"),
+            ("Francés", "fr"),
+            ("Alemán", "de"),
+            ("Italiano", "it"),
+            ("Ruso", "ru"),
+            ("Árabe", "ar"),
+            ("Hindi", "hi"),
+            ("Japonés", "ja"),
+            ("Chino simplificado", "zh-Hans"),
+        ):
+            self.cbo_idioma_yt.addItem(etiqueta, codigo)
+        self.cbo_idioma_yt.setToolTip(
+            "Idioma principal del título y la descripción (snippet.defaultLanguage)."
+        )
+        form_yt.addRow("Idioma del video:", self.cbo_idioma_yt)
 
         self.lbl_mini = QLineEdit()
         self.lbl_mini.setReadOnly(True)
@@ -852,15 +1060,77 @@ class VentanaPrincipal(QMainWindow):
         fila_m.addWidget(self.lbl_mini, 1)
         fila_m.addWidget(b_mini)
         form_yt.addRow("Miniatura:", fila_m)
+        lay_yt.addWidget(self.grp_datos_yt)
+
+        # ── 3. Publicación ──
+        self.grp_pub_yt = QGroupBox("Publicación")
+        form_pub = QFormLayout(self.grp_pub_yt)
+        form_pub.setSpacing(8)
+
+        self.cbo_privacidad_youtube = QComboBox()
+        self.cbo_privacidad_youtube.addItem("Privado", "private")
+        self.cbo_privacidad_youtube.addItem("Oculto · solo con enlace", "unlisted")
+        self.cbo_privacidad_youtube.addItem("Público", "public")
+        form_pub.addRow("Privacidad:", self.cbo_privacidad_youtube)
+
+        self.chk_programar = QCheckBox("Programar publicación")
+        self.chk_programar.setToolTip(
+            "YouTube publica el video automáticamente en la fecha indicada. "
+            "Mientras tanto permanece privado."
+        )
+        self.chk_programar.toggled.connect(self._al_cambiar_programacion)
+        form_pub.addRow(self.chk_programar)
+
+        self.dt_publicar = QDateTimeEdit(QDateTime.currentDateTime().addSecs(3600))
+        self.dt_publicar.setCalendarPopup(True)
+        self.dt_publicar.setDisplayFormat("dd/MM/yyyy HH:mm")
+        self.dt_publicar.setMinimumDateTime(QDateTime.currentDateTime().addSecs(300))
+        self.dt_publicar.setEnabled(False)
+        self.dt_publicar.setToolTip("Fecha y hora local de publicación (mínimo 5 minutos después).")
+        form_pub.addRow("Fecha y hora:", self.dt_publicar)
+
+        self.chk_subir_yt = QCheckBox("Subir automáticamente al terminar el render")
+        self.chk_subir_yt.setChecked(False)
+        form_pub.addRow(self.chk_subir_yt)
 
         self.chk_ver_antes = QCheckBox("Revisar antes de subir (quedará pendiente)")
-        form_yt.addRow(self.chk_ver_antes)
-
-        lay_yt.addWidget(self.grp_yt)
+        form_pub.addRow(self.chk_ver_antes)
 
         self.btn_subir_pend = QPushButton("⬆ Subir video pendiente…")
         self.btn_subir_pend.clicked.connect(self._subir_pendiente)
-        lay_yt.addWidget(self.btn_subir_pend)
+        form_pub.addRow(self.btn_subir_pend)
+        lay_yt.addWidget(self.grp_pub_yt)
+
+        # ── 4. Editar un video ya publicado ──
+        self.grp_editar_yt = QGroupBox("Editar un video ya publicado")
+        form_edit = QFormLayout(self.grp_editar_yt)
+        form_edit.setSpacing(8)
+
+        self.cbo_videos_youtube = QComboBox()
+        self.cbo_videos_youtube.currentIndexChanged.connect(self._seleccionar_video_youtube)
+        form_edit.addRow("Video:", self.cbo_videos_youtube)
+
+        self.btn_recargar_videos_yt = QPushButton("↻ Cargar mis videos")
+        self.btn_recargar_videos_yt.clicked.connect(self._cargar_videos_youtube)
+        form_edit.addRow(self.btn_recargar_videos_yt)
+
+        self.btn_actualizar_video_yt = QPushButton("Guardar cambios del video seleccionado")
+        self.btn_actualizar_video_yt.clicked.connect(self._actualizar_video_youtube)
+        form_edit.addRow(self.btn_actualizar_video_yt)
+
+        hint_edit = QLabel(
+            "Al elegir un video se cargan sus datos arriba; edítalos y guarda. "
+            "Se conservan categoría, idioma y ajustes que la ventana no muestra."
+        )
+        hint_edit.setWordWrap(True)
+        hint_edit.setObjectName("HintLabel")
+        form_edit.addRow(hint_edit)
+        lay_yt.addWidget(self.grp_editar_yt)
+
+        self.lbl_subida_yt = QLabel("La cuenta, los metadatos y los recursos comparten el proyecto actual.")
+        self.lbl_subida_yt.setWordWrap(True)
+        self.lbl_subida_yt.setObjectName("YouTubeStatus")
+        lay_yt.addWidget(self.lbl_subida_yt)
         lay_yt.addStretch()
 
         scroll_yt.setWidget(w_yt_inner)
@@ -868,14 +1138,46 @@ class VentanaPrincipal(QMainWindow):
         lay_outer_yt.setContentsMargins(0, 0, 0, 0)
         lay_outer_yt.addWidget(scroll_yt)
 
-        self.tabs_inspector.addTab(w_yt, "🚀 YouTube")
-
-        # Pestaña 5: Inteligencia Artificial
+        self._youtube_panel = w_yt
+        # Los paneles son ventanas auxiliares, no pestañas del inspector.
         self.panel_ia = PanelIA(self)
-        self.tabs_inspector.addTab(self.panel_ia, "🤖 IA")
 
         lay.addWidget(self.tabs_inspector, 1)
         return panel
+
+    def _crear_ventana_auxiliar(self, titulo: str, contenido: QWidget, ancho: int, alto: int) -> QDialog:
+        dialogo = QDialog(self)
+        dialogo.setWindowTitle(titulo)
+        dialogo.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        dialogo.resize(ancho, alto)
+        layout = QVBoxLayout(dialogo)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.addWidget(contenido)
+        return dialogo
+
+    def _abrir_ventana_ia(self) -> None:
+        if self._ventana_ia is None:
+            self._ventana_ia = self._crear_ventana_auxiliar(
+                "Studio Cut · Asistente IA", self.panel_ia, 620, 850
+            )
+        self.panel_ia.refrescar_desde_config()
+        self._ventana_ia.show()
+        self._ventana_ia.raise_()
+        self._ventana_ia.activateWindow()
+
+    def _abrir_ventana_youtube(self) -> None:
+        if self._ventana_youtube is None:
+            cuerpo_youtube = QWidget()
+            layout_youtube = QVBoxLayout(cuerpo_youtube)
+            layout_youtube.setContentsMargins(0, 0, 0, 0)
+            layout_youtube.addWidget(self._youtube_panel)
+            self._ventana_youtube = self._crear_ventana_auxiliar(
+                "Studio Cut · YouTube", cuerpo_youtube, 520, 650
+            )
+        self._actualizar_estado_youtube()
+        self._ventana_youtube.show()
+        self._ventana_youtube.raise_()
+        self._ventana_youtube.activateWindow()
 
     # -------------------------------------------- Pestaña de Subtítulos
     def _construir_tab_subtitulos(self) -> QWidget:
@@ -1230,6 +1532,116 @@ class VentanaPrincipal(QMainWindow):
         self._proyecto_modificado = True
         self._actualizar_titulo_proyecto()
 
+    # ------------------------------------------------- Deshacer / Rehacer
+    def _huella_undo(self) -> tuple:
+        """Resumen barato del proyecto para detectar cambios sin serializarlo."""
+        try:
+            cues = tuple(
+                (c.get("inicio"), c.get("fin"), c.get("texto")) for c in self.subtitulos
+            )
+            efectos = tuple(sorted(
+                (k, tuple(sorted(v.items()))) for k, v in self.efectos_clip.items()
+            ))
+            return (
+                tuple(self.audios),
+                tuple(self.imagenes),
+                tuple((m.get("inicio"), m.get("titulo")) for m in self.marcas),
+                cues,
+                efectos,
+                tuple(sorted(self.img_manual.items())),
+                hash(self.txt_script.toPlainText()),
+                hash(self.txt_desc.toPlainText()),
+                self.txt_titulo.text(),
+                self.txt_tags.text(),
+                self.combo_modo.currentIndex(),
+                self.spin_vel.value(),
+                self.spin_trans.value(),
+                self.cbo_estilo.currentIndex(),
+                self.cbo_res.currentIndex(),
+                repr(self.efecto_global.a_dict()),
+                len(self.palabras_transcripcion),
+                self.chk_quemar_subtitulos.isChecked(),
+                self.chk_sub_mostrar.isChecked(),
+            )
+        except Exception:  # noqa: BLE001
+            return ()
+
+    def _estado_serializado(self) -> str:
+        try:
+            return json.dumps(
+                self._recopilar_datos_proyecto(), sort_keys=True, ensure_ascii=False
+            )
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _capturar_undo(self) -> None:
+        """Guarda una instantánea si el proyecto cambió desde la última."""
+        if not getattr(self, "_undo_activo", False):
+            return
+        huella = self._huella_undo()
+        if not huella or huella == self._huella_actual:
+            return
+        nuevo = self._estado_serializado()
+        anterior = self._snapshot_undo
+        self._huella_actual = huella
+        if not nuevo or nuevo == anterior:
+            return
+        self._snapshot_undo = nuevo
+        if anterior:
+            self._undo_stack.append(anterior)
+            if len(self._undo_stack) > 40:
+                self._undo_stack.pop(0)
+            self._redo_stack.clear()
+        self._actualizar_acciones_undo()
+
+    def _deshacer(self) -> None:
+        self._capturar_undo()
+        if not self._undo_stack:
+            self.lbl_estado.setText("Nada que deshacer")
+            return
+        self._redo_stack.append(self._snapshot_undo)
+        self._aplicar_undo(self._undo_stack.pop(), "↶ Deshecho")
+
+    def _rehacer(self) -> None:
+        if not self._redo_stack:
+            self.lbl_estado.setText("Nada que rehacer")
+            return
+        self._undo_stack.append(self._snapshot_undo)
+        self._aplicar_undo(self._redo_stack.pop(), "↷ Rehecho")
+
+    def _aplicar_undo(self, estado: str, mensaje: str = "") -> None:
+        try:
+            datos = json.loads(estado)
+        except (TypeError, ValueError):
+            return
+        self._undo_activo = False
+        try:
+            self._aplicar_datos_proyecto(datos)
+        finally:
+            self._undo_activo = True
+        self._snapshot_undo = estado
+        self._huella_actual = self._huella_undo()
+        self._proyecto_modificado = True
+        self._actualizar_titulo_proyecto()
+        self._actualizar_acciones_undo()
+        if mensaje:
+            self.lbl_estado.setText(mensaje)
+
+    def _reiniciar_undo(self) -> None:
+        self._undo_stack.clear()
+        self._redo_stack.clear()
+        self._snapshot_undo = self._estado_serializado()
+        self._huella_actual = self._huella_undo()
+        self._actualizar_acciones_undo()
+
+    def _actualizar_acciones_undo(self) -> None:
+        boton_undo = getattr(self, "btn_deshacer", None)
+        boton_redo = getattr(self, "btn_rehacer", None)
+        if boton_undo is not None:
+            boton_undo.setEnabled(bool(self._undo_stack))
+        if boton_redo is not None:
+            boton_redo.setEnabled(bool(self._redo_stack))
+
     def _actualizar_subtitulos_monitor(self, *_args) -> None:
         if not hasattr(self, "monitor"):
             return
@@ -1472,6 +1884,27 @@ class VentanaPrincipal(QMainWindow):
             "QPushButton:hover { background: #334155; color: #e2e8f0; }"
             "QPushButton:checked { background: #0ea5e9; color: #ffffff; border-color: #0ea5e9; }"
         )
+
+        self.btn_deshacer = QPushButton("↶")
+        self.btn_deshacer.setToolTip("Deshacer (Ctrl+Z)")
+        self.btn_deshacer.setFixedWidth(28)
+        self.btn_deshacer.setStyleSheet(estilo_tool_btn)
+        self.btn_deshacer.setEnabled(False)
+        self.btn_deshacer.clicked.connect(self._deshacer)
+        barra_tl.addWidget(self.btn_deshacer)
+
+        self.btn_rehacer = QPushButton("↷")
+        self.btn_rehacer.setToolTip("Rehacer (Ctrl+Y)")
+        self.btn_rehacer.setFixedWidth(28)
+        self.btn_rehacer.setStyleSheet(estilo_tool_btn)
+        self.btn_rehacer.setEnabled(False)
+        self.btn_rehacer.clicked.connect(self._rehacer)
+        barra_tl.addWidget(self.btn_rehacer)
+
+        sep_undo = QFrame()
+        sep_undo.setFrameShape(QFrame.Shape.VLine)
+        sep_undo.setStyleSheet("color: #334155;")
+        barra_tl.addWidget(sep_undo)
 
         self.btn_tool_select = QPushButton("↖ Selección [V]")
         self.btn_tool_select.setCheckable(True)
@@ -1764,7 +2197,7 @@ class VentanaPrincipal(QMainWindow):
             return
         self.imagenes += rutas
         for r in rutas:
-            item = QListWidgetItem(QIcon(r), Path(r).name)
+            item = QListWidgetItem(icono_lista(r), Path(r).name)
             self.lista_imagenes.addItem(item)
 
         for k, v in list(self.img_manual.items()):
@@ -1811,7 +2244,7 @@ class VentanaPrincipal(QMainWindow):
         combo = QComboBox()
         combo.addItem("(sin imagen)", "")
         for r in self.imagenes:
-            combo.addItem(QIcon(r), Path(r).name, r)
+            combo.addItem(icono_lista(r), Path(r).name, r)
         if asignada:
             idx = combo.findData(asignada)
             if idx >= 0:
@@ -2051,6 +2484,7 @@ class VentanaPrincipal(QMainWindow):
             marca["efecto"] = self._efecto_para_clip(i)
 
         self.timeline.set_datos(marcas_vis, dur, nombre_a)
+        self._actualizar_onda(dur)
         trans_seg = self.spin_trans.value()
         self.monitor.set_todas_las_imagenes(self.imagenes)
         self.monitor.set_datos_en_vivo(
@@ -2069,6 +2503,41 @@ class VentanaPrincipal(QMainWindow):
 
         self._actualizar_subtitulos_monitor()
         self.monitor.set_tiempo(self.timeline._tiempo_actual, dur)
+
+    # --------------------------------------------------- Forma de onda (A1)
+    def _actualizar_onda(self, duracion: float) -> None:
+        """Pide la forma de onda real solo si cambió la lista de audios."""
+        self._onda_dur = duracion
+        clave = tuple(self.audios)
+        if not clave:
+            self._onda_clave = None
+            self._onda_valores = []
+            self.timeline.set_onda([], 0.0)
+            return
+        if self._onda_clave == clave and self._onda_valores:
+            self.timeline.set_onda(self._onda_valores, duracion)
+            return
+        trabajador = self._onda_trabajador
+        if trabajador is not None and trabajador.isRunning():
+            if trabajador.clave() == clave:
+                return
+        self.timeline.set_onda_pendiente(True)
+        nuevo = TrabajadorOnda(self.audios, self)
+        nuevo.listo.connect(self._onda_lista)
+        nuevo.fallo.connect(self._onda_fallo)
+        self._onda_trabajador = nuevo
+        nuevo.start()
+
+    def _onda_lista(self, valores: list, clave: tuple) -> None:
+        if tuple(self.audios) != tuple(clave):
+            return  # el proyecto cambió mientras se analizaba
+        self._onda_clave = tuple(clave)
+        self._onda_valores = list(valores)
+        self.timeline.set_onda(self._onda_valores, self._onda_dur)
+
+    def _onda_fallo(self, mensaje: str) -> None:
+        self.timeline.set_onda_pendiente(False)
+        self.log.appendPlainText(f"[Timeline] No se pudo dibujar la onda: {mensaje}")
 
     def _al_cambiar_tiempo_timeline(self, t: float) -> None:
         self.monitor.set_tiempo(t)
@@ -2208,7 +2677,7 @@ class VentanaPrincipal(QMainWindow):
             return
         if ruta_img not in self.imagenes:
             self.imagenes.append(ruta_img)
-            item = QListWidgetItem(QIcon(ruta_img), Path(ruta_img).name)
+            item = QListWidgetItem(icono_lista(ruta_img), Path(ruta_img).name)
             item.setData(Qt.ItemDataRole.UserRole, ruta_img)
             item.setToolTip(ruta_img)
             self.lista_imagenes.addItem(item)
@@ -2251,7 +2720,7 @@ class VentanaPrincipal(QMainWindow):
             for r in imgs_nuevas:
                 if r not in self.imagenes:
                     self.imagenes.append(r)
-                    item = QListWidgetItem(QIcon(r), Path(r).name)
+                    item = QListWidgetItem(icono_lista(r), Path(r).name)
                     item.setData(Qt.ItemDataRole.UserRole, r)
                     item.setToolTip(r)
                     self.lista_imagenes.addItem(item)
@@ -2314,13 +2783,18 @@ class VentanaPrincipal(QMainWindow):
             "sub_auto": self.chk_sub_auto.isChecked(),
             # Inteligencia artificial (nunca incluye claves)
             "ia": self._ia_config.a_dict(),
+            "paquete_editorial": dict(self._ia_paquete_editorial),
             "youtube": {
                 "titulo": self.txt_titulo.text(),
                 "descripcion": self.txt_desc.toPlainText(),
                 "tags": self.txt_tags.text(),
+                "privacidad": str(self.cbo_privacidad_youtube.currentData() or "unlisted"),
+                "idioma": self._idioma_yt(),
+                "programar": self.chk_programar.isChecked(),
+                "programar_fecha": self.dt_publicar.dateTime().toString(Qt.DateFormat.ISODate),
                 "secret": self.lbl_secret.text(),
                 "mini": self.lbl_mini.text(),
-                "subir_activo": self.grp_yt.isChecked(),
+                "subir_activo": self.chk_subir_yt.isChecked(),
                 "ver_antes": self.chk_ver_antes.isChecked(),
             },
             "deteccion": {
@@ -2389,6 +2863,12 @@ class VentanaPrincipal(QMainWindow):
 
         # Inteligencia artificial
         self._ia_config = ConfigIA.desde_dict(datos.get("ia"))
+        self._ia_paquete_editorial = dict(
+            datos.get("paquete_editorial") or self._ia_config.paquete_editorial or {}
+        )
+        self._ia_config.paquete_editorial = dict(self._ia_paquete_editorial)
+        if self._ia_paquete_editorial:
+            self.panel_ia._mostrar_paquete(self._ia_paquete_editorial)
         if hasattr(self, "panel_ia"):
             self.panel_ia.refrescar_desde_config()
 
@@ -2397,9 +2877,21 @@ class VentanaPrincipal(QMainWindow):
             self.txt_titulo.setText(str(yt.get("titulo") or ""))
             self.txt_desc.setPlainText(str(yt.get("descripcion") or ""))
             self.txt_tags.setText(str(yt.get("tags") or ""))
-            self.lbl_secret.setText(str(yt.get("secret") or ""))
+            privacidad = self.cbo_privacidad_youtube.findData(yt.get("privacidad", "unlisted"))
+            self.cbo_privacidad_youtube.setCurrentIndex(max(privacidad, 0))
+            idx_idioma = self.cbo_idioma_yt.findData(str(yt.get("idioma") or ""))
+            self.cbo_idioma_yt.setCurrentIndex(max(idx_idioma, 0))
+            self.chk_programar.blockSignals(True)
+            fecha_prog = QDateTime.fromString(
+                str(yt.get("programar_fecha") or ""), Qt.DateFormat.ISODate)
+            if fecha_prog.isValid():
+                self.dt_publicar.setDateTime(fecha_prog)
+            self.chk_programar.setChecked(bool(yt.get("programar", False)))
+            self.chk_programar.blockSignals(False)
+            self._al_cambiar_programacion(self.chk_programar.isChecked())
+            self.lbl_secret.setText(str(yt.get("secret") or self._ajustes.value("youtube_oauth_client") or ""))
             self.lbl_mini.setText(str(yt.get("mini") or ""))
-            self.grp_yt.setChecked(bool(yt.get("subir_activo", False)))
+            self.chk_subir_yt.setChecked(bool(yt.get("subir_activo", False)))
             self.chk_ver_antes.setChecked(bool(yt.get("ver_antes", False)))
 
         det = datos.get("deteccion") or {}
@@ -2420,7 +2912,7 @@ class VentanaPrincipal(QMainWindow):
         self.lista_imagenes.clear()
         for r in self.imagenes:
             if Path(r).exists():
-                item = QListWidgetItem(QIcon(r), Path(r).name)
+                item = QListWidgetItem(icono_lista(r), Path(r).name)
                 item.setData(Qt.ItemDataRole.UserRole, r)
                 item.setToolTip(r)
                 self.lista_imagenes.addItem(item)
@@ -2493,6 +2985,7 @@ class VentanaPrincipal(QMainWindow):
             datos = cargar_proyecto(ruta)
             self._ruta_proyecto = Path(ruta)
             self._aplicar_datos_proyecto(datos)
+            self._reiniciar_undo()
             self.lbl_estado.setText(f"✓ Proyecto abierto: {self._ruta_proyecto.name}")
             self.log.appendPlainText(f"[Proyecto] Cargado correctamente desde: {self._ruta_proyecto}")
         except Exception as exc:
@@ -2538,6 +3031,7 @@ class VentanaPrincipal(QMainWindow):
         self._aplicar_modo()
         self._actualizar_timeline_y_monitor()
         self._actualizar_titulo_proyecto()
+        self._reiniciar_undo()
         self.lbl_estado.setText("Nuevo proyecto en blanco creado.")
 
     def _actualizar_titulo_proyecto(self) -> None:
@@ -2804,11 +3298,19 @@ class VentanaPrincipal(QMainWindow):
         self._abrir_al_terminar = False
         titulo = self.txt_titulo.text().strip()
 
-        if self.grp_yt.isChecked() and not rapida:
+        if self.chk_subir_yt.isChecked() and not rapida:
+            if not RUTA_TOKEN.is_file():
+                QMessageBox.warning(
+                    self, "YouTube no conectado",
+                    "Primero conecta la cuenta desde el botón YouTube de la barra superior."
+                )
+                return
             if not self.lbl_secret.text():
                 QMessageBox.warning(
                     self, "Falta credencial",
                     "Para subir a YouTube selecciona client_secret.json.")
+                return
+            if not self._validar_programacion_ui():
                 return
             if not titulo:
                 self._subida_pendiente = True
@@ -2826,6 +3328,9 @@ class VentanaPrincipal(QMainWindow):
                         "client_secret": self.lbl_secret.text(),
                         "token_path": str(RUTA_TOKEN),
                         "miniatura": self.lbl_mini.text() or None,
+                        "privacidad": str(self.cbo_privacidad_youtube.currentData() or "unlisted"),
+                        "idioma": self._idioma_yt(),
+                        "publicar_en": self._publicar_en_iso(),
                     })
 
         trabajador.progreso.connect(self.barra.setValue)
@@ -2972,9 +3477,260 @@ class VentanaPrincipal(QMainWindow):
     # ------------------------------------------------------------- YouTube
     def _buscar_secret(self) -> None:
         ruta, _ = QFileDialog.getOpenFileName(
-            self, "Elegir client_secret.json", "", "JSON (*.json)")
+            self, "Elegir cliente OAuth de escritorio", "", "JSON (*.json)")
         if ruta:
             self.lbl_secret.setText(ruta)
+            self._ajustes.setValue("youtube_oauth_client", ruta)
+            self._actualizar_estado_youtube()
+
+    def _actualizar_estado_youtube(self) -> None:
+        conectado = RUTA_TOKEN.is_file()
+        if conectado:
+            nombre = str(self._ajustes.value("youtube_channel_name") or "")
+            estado = (
+                f"✓ Conectado: {nombre}. Puedes cargar videos, programar y publicar."
+                if nombre else "✓ Cuenta autorizada en este equipo. Puedes cargar videos y publicar."
+            )
+            self.lbl_estado_youtube.setText(estado)
+            self.lbl_subida_yt.setText(estado)
+            self.btn_conectar_youtube.setText("✓ Conectado · reconectar")
+        else:
+            estado = "No conectado. Elige el OAuth Desktop JSON y autoriza tu cuenta una vez."
+            self.lbl_estado_youtube.setText(estado)
+            self.lbl_subida_yt.setText(estado)
+            self.btn_conectar_youtube.setText("🔗 Conectar cuenta")
+        self.btn_desconectar_youtube.setEnabled(conectado)
+
+    def _desconectar_youtube(self) -> None:
+        resp = QMessageBox.question(
+            self, "Desconectar YouTube",
+            "Se borrará la autorización guardada en este equipo. "
+            "Tus videos y el proyecto no se tocan. ¿Continuar?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            RUTA_TOKEN.unlink(missing_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(self, "YouTube", f"No se pudo borrar el token:\n{exc}")
+            return
+        self._ajustes.remove("youtube_channel_name")
+        self.cbo_videos_youtube.blockSignals(True)
+        self.cbo_videos_youtube.clear()
+        self.cbo_videos_youtube.blockSignals(False)
+        self._youtube_video_ids.clear()
+        self._actualizar_estado_youtube()
+        self.lbl_subida_yt.setText("Cuenta desconectada. La próxima vez se pedirá autorización.")
+
+    def _al_cambiar_programacion(self, activo: bool) -> None:
+        self.dt_publicar.setEnabled(activo)
+        if activo:
+            idx = self.cbo_privacidad_youtube.findData("private")
+            self.cbo_privacidad_youtube.setCurrentIndex(max(idx, 0))
+            self.cbo_privacidad_youtube.setEnabled(False)
+            self.cbo_privacidad_youtube.setToolTip(
+                "Un video programado permanece privado hasta la fecha indicada."
+            )
+            if (self.dt_publicar.dateTime().toSecsSinceEpoch()
+                    < QDateTime.currentDateTime().addSecs(600).toSecsSinceEpoch()):
+                self.dt_publicar.setDateTime(QDateTime.currentDateTime().addSecs(3600))
+        else:
+            self.cbo_privacidad_youtube.setEnabled(True)
+            self.cbo_privacidad_youtube.setToolTip("")
+
+    def _publicar_en_iso(self) -> str:
+        """Fecha programada lista para la API (vacía si no se programa)."""
+        if not self.chk_programar.isChecked():
+            return ""
+        fecha = self.dt_publicar.dateTime().toPyDateTime().astimezone()
+        return fecha.isoformat(timespec="seconds")
+
+    def _idioma_yt(self) -> str:
+        return str(self.cbo_idioma_yt.currentData() or "")
+
+    def _conectar_youtube(self) -> None:
+        ruta_oauth = self.lbl_secret.text().strip()
+        if not ruta_oauth or not Path(ruta_oauth).is_file():
+            self._buscar_secret()
+            ruta_oauth = self.lbl_secret.text().strip()
+            if not ruta_oauth or not Path(ruta_oauth).is_file():
+                return
+        self.btn_conectar_youtube.setEnabled(False)
+        self.lbl_estado_youtube.setText("Abriendo autorización de Google en el navegador…")
+        self._lanzar_tarea_youtube(
+            lambda: __import__("core.youtube_uploader", fromlist=["conectar_cuenta"]).conectar_cuenta(
+                ruta_oauth, RUTA_TOKEN
+            ),
+            self._youtube_conectado,
+            self._youtube_error,
+        )
+
+    def _lanzar_tarea_youtube(self, funcion, al_listo, al_fallo) -> None:
+        from ui.widgets.panel_ia import _Tarea
+        tarea = _Tarea(funcion, self)
+        self._tareas_youtube = getattr(self, "_tareas_youtube", [])
+        self._tareas_youtube.append(tarea)
+        self._tareas_youtube_actuales = getattr(self, "_tareas_youtube_actuales", {})
+        self._tareas_youtube_actuales[tarea] = (al_listo, al_fallo)
+        tarea.listo.connect(al_listo)
+        tarea.fallo.connect(al_fallo)
+        tarea.finished.connect(lambda: self._olvidar_tarea_youtube(tarea))
+        tarea.start()
+
+    def _olvidar_tarea_youtube(self, tarea) -> None:
+        if tarea in getattr(self, "_tareas_youtube", []):
+            self._tareas_youtube.remove(tarea)
+        callbacks = getattr(self, "_tareas_youtube_actuales", {}).pop(tarea, None)
+        if callbacks and tarea.isFinished():
+            try:
+                tarea.listo.disconnect(callbacks[0])
+            except (TypeError, RuntimeError):
+                pass
+            try:
+                tarea.fallo.disconnect(callbacks[1])
+            except (TypeError, RuntimeError):
+                pass
+        tarea.deleteLater()
+
+    def _youtube_conectado(self, cuenta: dict) -> None:
+        self.btn_conectar_youtube.setEnabled(True)
+        nombre = str(cuenta.get("nombre", "Canal YouTube"))
+        self._ajustes.setValue("youtube_channel_name", nombre)
+        self.lbl_estado_youtube.setText(f"✓ Conectado: {nombre}")
+        self.lbl_subida_yt.setText(f"✓ Conectado: {nombre}")
+        self.btn_conectar_youtube.setText("✓ Cuenta conectada · reconectar")
+        self._cargar_videos_youtube()
+
+    def _youtube_error(self, mensaje: str) -> None:
+        self.btn_conectar_youtube.setEnabled(True)
+        self.btn_recargar_videos_yt.setEnabled(True)
+        if hasattr(self, "btn_actualizar_video_yt"):
+            self.btn_actualizar_video_yt.setEnabled(True)
+        self.lbl_estado_youtube.setText("Error de YouTube. Revisa el mensaje para volver a intentar.")
+        self.lbl_subida_yt.setText("Error de YouTube: revisa la conexión, permisos o configuración OAuth.")
+        QMessageBox.warning(self, "YouTube", mensaje)
+
+    def _cargar_videos_youtube(self) -> None:
+        if not RUTA_TOKEN.is_file():
+            QMessageBox.information(self, "YouTube no conectado", "Pulsa «Conectar cuenta de YouTube» primero.")
+            return
+        ruta_oauth = self.lbl_secret.text().strip()
+        self.btn_recargar_videos_yt.setEnabled(False)
+        self.lbl_estado_youtube.setText("Cargando videos del canal…")
+        self._lanzar_tarea_youtube(
+            lambda: __import__("core.youtube_uploader", fromlist=["listar_videos"]).listar_videos(
+                RUTA_TOKEN, 50, ruta_oauth
+            ),
+            self._videos_youtube_listos,
+            self._youtube_error,
+        )
+
+    def _videos_youtube_listos(self, videos: list[dict]) -> None:
+        self.btn_recargar_videos_yt.setEnabled(True)
+        self.cbo_videos_youtube.blockSignals(True)
+        self.cbo_videos_youtube.clear()
+        self._youtube_video_ids.clear()
+        for video in videos:
+            video_id = str(video.get("id", ""))
+            titulo = str(video.get("titulo", "(sin título)"))
+            self.cbo_videos_youtube.addItem(titulo, video_id)
+            self._youtube_video_ids[video_id] = video
+        self.cbo_videos_youtube.blockSignals(False)
+        self.lbl_estado_youtube.setText(f"✓ Conectado · {len(videos)} videos cargados")
+        if videos:
+            self._seleccionar_video_youtube(0)
+
+    def _seleccionar_video_youtube(self, indice: int) -> None:
+        video_id = self.cbo_videos_youtube.itemData(indice) if indice >= 0 else ""
+        video = self._youtube_video_ids.get(str(video_id), {})
+        if not video:
+            return
+        self.txt_titulo.setText(video.get("titulo", ""))
+        self.txt_desc.setPlainText(video.get("descripcion", ""))
+        self.txt_tags.setText(", ".join(video.get("etiquetas", [])))
+        privacidad = self.cbo_privacidad_youtube.findData(video.get("privacidad", "unlisted"))
+        self.cbo_privacidad_youtube.setCurrentIndex(max(privacidad, 0))
+
+        idioma = str(video.get("idioma") or "")
+        idx_idioma = self.cbo_idioma_yt.findData(idioma)
+        if idx_idioma < 0:
+            self.cbo_idioma_yt.addItem(idioma, idioma)
+            idx_idioma = self.cbo_idioma_yt.count() - 1
+        self.cbo_idioma_yt.setCurrentIndex(max(idx_idioma, 0))
+
+        # Un video ya publicado puede conservar publishAt antiguo: solo se
+        # muestra como programado si la fecha sigue en el futuro y está privado.
+        programado = str(video.get("programado") or "")
+        fecha_prog = (
+            QDateTime.fromString(programado, Qt.DateFormat.ISODate)
+            if programado else QDateTime()
+        )
+        es_futura = (
+            fecha_prog.isValid()
+            and fecha_prog > QDateTime.currentDateTime()
+            and str(video.get("privacidad") or "") == "private"
+        )
+        self.chk_programar.blockSignals(True)
+        if es_futura:
+            self.dt_publicar.setDateTime(fecha_prog)
+        self.chk_programar.setChecked(es_futura)
+        self.chk_programar.blockSignals(False)
+        self._al_cambiar_programacion(self.chk_programar.isChecked())
+
+        self.lbl_estado_youtube.setText(f"Editando: {video.get('titulo', '')}")
+
+    def _validar_programacion_ui(self) -> bool:
+        if not self.chk_programar.isChecked():
+            return True
+        if (self.dt_publicar.dateTime().toSecsSinceEpoch()
+                < QDateTime.currentDateTime().addSecs(300).toSecsSinceEpoch()):
+            QMessageBox.warning(
+                self, "Fecha no válida",
+                "La publicación programada debe ser al menos 5 minutos en el futuro."
+            )
+            return False
+        return True
+
+    def _actualizar_video_youtube(self) -> None:
+        video_id = str(self.cbo_videos_youtube.currentData() or "")
+        if not video_id:
+            QMessageBox.information(self, "Selecciona un video", "Carga y selecciona primero un video del canal.")
+            return
+        if not self._validar_programacion_ui():
+            return
+        miniatura = self.lbl_mini.text().strip()
+        titulo = self.txt_titulo.text().strip()
+        descripcion = self.txt_desc.toPlainText().strip()
+        etiquetas = [t.strip() for t in self.txt_tags.text().split(",") if t.strip()]
+        privacidad = str(self.cbo_privacidad_youtube.currentData() or "unlisted")
+        ruta_oauth = self.lbl_secret.text().strip()
+        self.btn_actualizar_video_yt.setEnabled(False)
+        self._lanzar_tarea_youtube(
+            lambda: __import__("core.youtube_uploader", fromlist=["actualizar_video"]).actualizar_video(
+                video_id,
+                titulo,
+                descripcion,
+                etiquetas,
+                privacidad,
+                RUTA_TOKEN,
+                miniatura or None,
+                client_secret=ruta_oauth,
+                idioma=self._idioma_yt(),
+                publicar_en=self._publicar_en_iso(),
+            ),
+            self._video_youtube_actualizado,
+            self._youtube_actualizar_fallo,
+        )
+
+    def _video_youtube_actualizado(self, _resultado) -> None:
+        self.btn_actualizar_video_yt.setEnabled(True)
+        QMessageBox.information(self, "YouTube", "Se guardaron los metadatos y la miniatura del video seleccionado.")
+        self._cargar_videos_youtube()
+
+    def _youtube_actualizar_fallo(self, mensaje: str) -> None:
+        self.btn_actualizar_video_yt.setEnabled(True)
+        self._youtube_error(mensaje)
 
     def _buscar_miniatura(self) -> None:
         ruta, _ = QFileDialog.getOpenFileName(
@@ -3013,10 +3769,15 @@ class VentanaPrincipal(QMainWindow):
                 self, "Falta título",
                 "Escribe el título en el panel de YouTube antes de subir.")
             return
+        if not RUTA_TOKEN.is_file():
+            QMessageBox.warning(self, "YouTube no conectado", "Conecta tu cuenta antes de subir videos.")
+            return
         if not self.lbl_secret.text():
             QMessageBox.warning(
                 self, "Falta credencial",
                 "Selecciona client_secret.json en el panel de YouTube.")
+            return
+        if not self._validar_programacion_ui():
             return
 
         trabajador = Trabajador("", ConfigRender())
@@ -3027,6 +3788,9 @@ class VentanaPrincipal(QMainWindow):
             "client_secret": self.lbl_secret.text(),
             "token_path": str(RUTA_TOKEN),
             "miniatura": self.lbl_mini.text() or None,
+            "privacidad": str(self.cbo_privacidad_youtube.currentData() or "unlisted"),
+            "idioma": self._idioma_yt(),
+            "publicar_en": self._publicar_en_iso(),
         })
         trabajador.log.connect(self.log.appendPlainText)
         trabajador.listo.connect(self._pendiente_sube)
@@ -3129,6 +3893,35 @@ class VentanaPrincipal(QMainWindow):
         self.lbl_estado.setText("Guion de IA insertado. Generando la voz…")
         self._guardar_sesion()
 
+    def _ia_aplicar_paquete(
+        self, paquete: dict, *, elegir_titulo: bool = True
+    ) -> None:
+        """Rellena los metadatos de publicación; el usuario puede editarlos antes de subir."""
+        self._ia_paquete_editorial = dict(paquete or {})
+        self._ia_config.paquete_editorial = dict(self._ia_paquete_editorial)
+        if hasattr(self, "panel_ia"):
+            self.panel_ia._mostrar_paquete(self._ia_paquete_editorial)
+        titulos = self._ia_paquete_editorial.get("titulos") or []
+        titulo_actual = self.txt_titulo.text().strip()
+        if elegir_titulo and titulos and not titulo_actual:
+            self.txt_titulo.setText(str(titulos[0]))
+        descripcion = str(self._ia_paquete_editorial.get("descripcion") or "").strip()
+        if descripcion and (elegir_titulo or not self.txt_desc.toPlainText().strip()):
+            self.txt_desc.setPlainText(descripcion)
+        etiquetas = self._ia_paquete_editorial.get("etiquetas") or []
+        if etiquetas and (elegir_titulo or not self.txt_tags.text().strip()):
+            self.txt_tags.setText(", ".join(str(tag) for tag in etiquetas))
+        miniatura = str(self._ia_paquete_editorial.get("miniatura_ruta") or "")
+        if miniatura and Path(miniatura).exists():
+            self.lbl_mini.setText(miniatura)
+        self._proyecto_modificado = True
+        self._actualizar_titulo_proyecto()
+        self._guardar_sesion()
+        self.lbl_estado.setText(
+            "Paquete editorial preparado. Revisa título, descripción, etiquetas, "
+            "fuentes y miniatura antes de publicar."
+        )
+
     def _ia_aplicar_imagenes(self, rutas: list[str]) -> None:
         """Sustituye las imágenes generadas por IA y refresca la línea de tiempo."""
         carpeta_ia = (CARPETA_CFG / "imagenes_generadas").resolve()
@@ -3151,7 +3944,7 @@ class VentanaPrincipal(QMainWindow):
         self.lista_imagenes.clear()
         for ruta in self.imagenes:
             if Path(ruta).exists():
-                item = QListWidgetItem(QIcon(ruta), Path(ruta).name)
+                item = QListWidgetItem(icono_lista(ruta), Path(ruta).name)
                 item.setData(Qt.ItemDataRole.UserRole, ruta)
                 item.setToolTip(ruta)
                 self.lista_imagenes.addItem(item)
@@ -3180,6 +3973,7 @@ class VentanaPrincipal(QMainWindow):
         self._ajustes.setValue("marcas", self.marcas)
         self._ajustes.setValue("modo", self.combo_modo.currentIndex())
         self._ajustes.setValue("pendientes", json.dumps(self._pendientes()))
+        self._ajustes.setValue("youtube_oauth_client", self.lbl_secret.text())
         self._ajustes.setValue("guion", self.txt_script.toPlainText())
         self._ajustes.setValue("voz", self.combo_voz.currentData() or "")
         self._ajustes.setValue("velocidad", self.spin_vel.value())
@@ -3206,6 +4000,12 @@ class VentanaPrincipal(QMainWindow):
         self._ajustes.setValue(
             "ia_config", json.dumps(self._ia_config.a_dict(), ensure_ascii=False)
         )
+        self._ajustes.setValue(
+            "paquete_editorial",
+            json.dumps(self._ia_paquete_editorial, ensure_ascii=False),
+        )
+        self._actualizar_estado_youtube()
+
 
     def _cargar_sesion(self) -> None:
         self.audios = list(self._ajustes.value("audios") or [])
@@ -3301,7 +4101,7 @@ class VentanaPrincipal(QMainWindow):
 
         for r in self.imagenes:
             if Path(r).exists():
-                item = QListWidgetItem(QIcon(r), Path(r).name)
+                item = QListWidgetItem(icono_lista(r), Path(r).name)
                 item.setData(Qt.ItemDataRole.UserRole, r)
                 item.setToolTip(r)
                 self.lista_imagenes.addItem(item)
@@ -3328,4 +4128,7 @@ class VentanaPrincipal(QMainWindow):
                 return
 
         self._guardar_sesion()
+        for ventana_auxiliar in (self._ventana_ia, self._ventana_youtube):
+            if ventana_auxiliar is not None:
+                ventana_auxiliar.close()
         super().closeEvent(evento)
